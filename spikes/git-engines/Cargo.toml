@@ -1,0 +1,15 @@
+[package]
+name = "git-engines-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# A spike, not part of projj: can gitoxide or grit-lib write the git index
+# the way projj needs, matching real git? See README.md.
+
+[dependencies]
+anyhow = "1.0.104"
+# The version jj-lib already brings into projj.
+gix = { version = "0.85", default-features = false, features = ["index", "attributes", "excludes", "sha1", "sha256"] }
+grit-lib = "=0.5.0"
+tempfile = "3.27.0"

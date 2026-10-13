@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<!-- Only projj's own scripts run, whatever text a diff carries. Style
+     attributes are allowed: the file trees indent rows with them. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>projj</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <span class="brand-name">projj</span>
+    <span class="brand-root" id="root-name"></span>
+    <span class="brand-head" id="root-head"></span>
+  </div>
+  <nav class="views" aria-label="Views">
+    <button type="button" data-view="review" aria-pressed="true">Review</button>
+    <button type="button" data-view="history" aria-pressed="false">History</button>
+  </nav>
+  <div class="bar-tools">
+    <label class="field">Layout
+      <select id="layout">
+        <option value="unified">Unified</option>
+        <option value="split">Side by side</option>
+      </select>
+    </label>
+    <label class="field">Context
+      <select id="context">
+        <option value="3">3 lines</option>
+        <option value="10">10 lines</option>
+        <option value="40">40 lines</option>
+        <option value="100000">Whole file</option>
+      </select>
+    </label>
+    <button type="button" id="editor-toggle" aria-pressed="false" title="Show or hide the editor">Editor</button>
+    <button type="button" id="refresh" title="Reload from disk">Reload</button>
+    <button type="button" id="theme" title="Switch between light and dark">Theme</button>
+    <button type="button" id="tweaks-open" aria-pressed="false" title="Adjust colors and type for reading">Tweaks</button>
+    <button type="button" id="help-open" title="Keyboard shortcuts (?)">Keys</button>
+  </div>
+</header>
+
+<main id="review" class="view">
+  <aside class="side" aria-label="Files">
+    <div class="sides" role="tablist">
+      <button type="button" role="tab" data-side="unstaged" aria-selected="true">To review <span class="count" id="count-unstaged"></span></button>
+      <button type="button" role="tab" data-side="staged" aria-selected="false">Reviewed <span class="count" id="count-staged"></span></button>
+    </div>
+    <p class="side-note" id="side-note"></p>
+    <div class="tree" id="tree"></div>
+  </aside>
+  <section class="stream" id="stream" tabindex="-1"></section>
+</main>
+
+<main id="history" class="view" hidden>
+  <div class="history-bar">
+    <label class="field">Workspace <select id="workspace"></select></label>
+    <span class="repo-note" id="repo-note" hidden></span>
+    <form id="revset-form" class="revset">
+      <input id="revset" type="text" spellcheck="false" autocomplete="off" aria-label="Revset">
+      <button type="submit">Show</button>
+    </form>
+    <div class="seg" role="tablist">
+      <button type="button" role="tab" data-mode="changes" aria-selected="true">Changes</button>
+      <button type="button" role="tab" data-mode="operations" aria-selected="false">Operations</button>
+    </div>
+    <button type="button" id="snapshot" title="Record the files on disk into the working-copy change, as any jj command would">Snapshot working copy</button>
+  </div>
+  <div class="history-body">
+    <section class="log" id="log" tabindex="-1" aria-label="Changes"></section>
+    <section class="detail" id="detail" tabindex="-1"></section>
+  </div>
+</main>
+
+<section id="editor" aria-label="Editor" hidden>
+  <div id="editor-resize" role="separator" aria-orientation="horizontal" aria-label="Resize the editor" tabindex="0" title="Drag to resize"></div>
+  <header>
+    <button type="button" id="explorer-toggle" aria-pressed="true" title="Show or hide the file list">Files</button>
+    <span id="editor-path"></span>
+    <span id="editor-state" role="status"></span>
+    <button type="button" id="editor-drafts" class="quiet" title="See everything you have not saved, and clear out what you do not want" hidden></button>
+    <button type="button" id="editor-save-all" hidden></button>
+    <button type="button" id="editor-save" class="mark" title="Writes the file to disk. It does not mark anything as reviewed.">Save</button>
+    <button type="button" id="editor-close" title="Hide the editor. Open files and unsaved edits are kept.">Hide</button>
+  </header>
+  <div class="editor-main">
+    <aside id="explorer" aria-label="Files">
+      <input id="explorer-filter" type="search" placeholder="Find a file" spellcheck="false" autocomplete="off" aria-label="Find a file">
+      <div id="explorer-open" hidden></div>
+      <div id="explorer-tree"></div>
+    </aside>
+    <div class="editor-pane">
+      <div id="editor-notice" role="alert" hidden></div>
+      <div class="editor-body">
+        <pre id="editor-gutter" aria-hidden="true" hidden></pre>
+        <div id="editor-texts"></div>
+        <p id="editor-empty">Pick a file on the left, or select text in a diff and choose Edit.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<dialog id="merge" aria-labelledby="merge-title">
+  <header>
+    <h2 id="merge-title"></h2>
+    <p id="merge-lede"></p>
+    <p id="merge-refreshed" role="status" hidden>The file changed again while this was open. This is how things stand now.</p>
+  </header>
+  <div id="merge-panes"></div>
+  <footer id="merge-actions"></footer>
+</dialog>
+
+<dialog id="drafts" aria-labelledby="drafts-title">
+  <h2 id="drafts-title">Unsaved edits</h2>
+  <p>Edits you have not saved are kept on this device, filed under this root, until you save or discard them. They come back whichever port or browser the root is next opened in, however long that takes.</p>
+  <p id="drafts-where" hidden></p>
+  <ul id="drafts-list"></ul>
+  <p id="drafts-empty" hidden>Nothing is unsaved.</p>
+  <footer>
+    <button type="button" id="drafts-discard-all">Discard all</button>
+    <button type="button" id="drafts-close" class="mark">Close</button>
+  </footer>
+</dialog>
+
+<dialog id="tweaks" aria-labelledby="tweaks-title">
+  <header>
+    <h2 id="tweaks-title">Tweaks</h2>
+    <button type="button" id="tweaks-close" class="quiet">Close</button>
+  </header>
+  <p>Changes show as you make them, here and in the page behind. They are kept on this device for every projj page, separately for each theme.</p>
+  <div class="seg" id="tweaks-theme" role="group" aria-label="Theme being tuned">
+    <button type="button" data-theme="light">Light</button>
+    <button type="button" data-theme="dark">Dark</button>
+  </div>
+  <div class="tweak-sample" id="tweaks-sample"></div>
+  <div id="tweaks-controls"></div>
+  <details id="tweaks-json">
+    <summary>Export or import as JSON</summary>
+    <textarea id="tweaks-json-text" rows="10" spellcheck="false" autocomplete="off" aria-label="Settings as JSON"></textarea>
+    <div class="tweaks-json-actions">
+      <button type="button" id="tweaks-copy">Copy</button>
+      <button type="button" id="tweaks-download">Download</button>
+      <button type="button" id="tweaks-open-file">Open file…</button>
+      <input type="file" id="tweaks-file" accept="application/json,.json" hidden>
+      <button type="button" id="tweaks-apply" class="mark">Import</button>
+    </div>
+    <p id="tweaks-json-note" role="status"></p>
+  </details>
+  <footer>
+    <button type="button" id="tweaks-reset">Reset to defaults</button>
+    <button type="button" id="tweaks-done" class="mark">Done</button>
+  </footer>
+</dialog>
+
+<dialog id="help">
+  <h2>Keyboard</h2>
+  <dl>
+    <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next or previous hunk (Review), change (History)</dd>
+    <dt><kbd>r</kbd></dt><dd>Mark the focused hunk, or its selected lines, reviewed</dd>
+    <dt><kbd>u</kbd></dt><dd>Send the focused hunk back to review</dd>
+    <dt><kbd>e</kbd></dt><dd>Edit the file at the selected text</dd>
+    <dt><kbd>]</kbd> <kbd>[</kbd></dt><dd>Next or previous file</dd>
+    <dt><kbd>t</kbd></dt><dd>Switch between To review and Reviewed</dd>
+    <dt><kbd>1</kbd> <kbd>2</kbd></dt><dd>Review, History</dd>
+    <dt><kbd>/</kbd></dt><dd>Edit the revset (History)</dd>
+  </dl>
+  <p>Click a changed line's number to select it, or to deselect it. Shift-click does the same to every line in between. Selected lines can be marked on their own.</p>
+  <p>Select any text in a diff to edit the file at that spot. The editor opens below the diff, so both stay in view; drag its top edge to resize it.</p>
+  <p>The editor keeps every file you open, with its unsaved edits, until you close that file. Unsaved edits also survive hiding the editor and reloading the page; "Unsaved edits" in the editor lists them all.</p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
+
+<div id="selection-actions" hidden>
+  <button type="button" id="selection-edit" title="Edit the file at this spot (e)">Edit</button>
+</div>
+
+
+<div id="toast" role="status" aria-live="polite" hidden></div>
+<script src="/app.js" type="module"></script>
+</body>
+</html>

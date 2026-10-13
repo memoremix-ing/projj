@@ -1,0 +1,54 @@
+[package]
+name = "projj"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+axum = "0.8"
+bstr = "1"
+chrono = "0.4"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures = "0.3.34"
+getrandom = "0.3"
+# The built-in git, for machines without one (src/git_builtin.rs). Pinned
+# exactly: it is young and its API still moves; run spikes/git-engines and
+# the git_builtin tests again before changing it.
+grit-lib = "=0.5.0"
+hex = "0.4.3"
+jj-lib = "=0.43.0"
+# The jj command line, run as `projj jj` and for the snapshot button. Same
+# version as jj-lib; watchman as in the jj people install.
+jj-cli = { version = "=0.43.0", default-features = false, features = ["git", "watchman"] }
+pollster = "1.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+# The diff algorithm choice grit-lib takes.
+similar = "3"
+sha2 = "0.11.1"
+syntect = { version = "5.3", default-features = false, features = ["parsing", "regex-fancy"] }
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "process", "net", "signal", "io-util", "io-std", "fs"] }
+tower = { version = "0.5", features = ["util"] }
+# Pinned exactly: servers share one database file through a mode whose
+# on-disk coordination format may change between releases.
+turso = { version = "=0.8.3", default-features = false }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+# Syntax grammars are regex-driven and unusably slow without optimization,
+# which would make the debug build misleading to try out.
+[profile.dev.package.syntect]
+opt-level = 3
+[profile.dev.package.fancy-regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.bincode]
+opt-level = 3
