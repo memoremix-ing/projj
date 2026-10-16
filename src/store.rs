@@ -1,5 +1,5 @@
 //! What projj keeps between sessions, in one database for the whole device:
-//! unsaved editor text, and display settings.
+//! unsaved editor text, display settings, and the roots opened lately.
 //!
 //! Every projj server on the machine opens the same Turso database file. Each
 //! draft is filed under the root it was written in, so edits follow the root,
@@ -43,7 +43,14 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS drafts (
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS roots (
+    path TEXT PRIMARY KEY,
+    opened INTEGER NOT NULL
 );";
+
+/// How many recently opened roots are remembered.
+const RECENT_ROOTS: i64 = 30;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -345,6 +352,54 @@ impl Store {
     }
 }
 
+impl Store {
+    /// The roots opened lately, the latest first, with when each was opened
+    /// in milliseconds since the epoch.
+    pub async fn recent_roots(&self) -> Result<Vec<(String, i64)>> {
+        let mut guard = self.connection().await?;
+        let rows = guard
+            .rows(
+                "SELECT path, opened FROM roots ORDER BY opened DESC LIMIT ?1",
+                (RECENT_ROOTS,),
+            )
+            .await?;
+        rows.iter()
+            .map(|row| Ok((row.get(0)?, row.get(1)?)))
+            .collect::<turso::Result<_>>()
+            .map_err(|err| self.fail(err))
+    }
+
+    /// Notes that `root` was opened at `at`, and forgets the oldest roots
+    /// beyond the few that are kept.
+    pub async fn opened_root(&self, root: &str, at: i64) -> Result<()> {
+        let mut guard = self.connection().await?;
+        guard
+            .execute(
+                "INSERT INTO roots (path, opened) VALUES (?1, ?2)
+                 ON CONFLICT (path) DO UPDATE SET opened = excluded.opened",
+                (root, at),
+            )
+            .await?;
+        guard
+            .execute(
+                "DELETE FROM roots WHERE path NOT IN
+                 (SELECT path FROM roots ORDER BY opened DESC LIMIT ?1)",
+                (RECENT_ROOTS,),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Takes `root` off the recent list. Not having it is not an error.
+    pub async fn forget_root(&self, root: &str) -> Result<()> {
+        let mut guard = self.connection().await?;
+        guard
+            .execute("DELETE FROM roots WHERE path = ?1", (root,))
+            .await?;
+        Ok(())
+    }
+}
+
 /// The open connection, held for the length of one operation.
 struct Guard<'a> {
     store: &'a Store,
@@ -537,5 +592,31 @@ mod tests {
             one.settings().await.unwrap().keys().collect::<Vec<_>>(),
             ["tweaks"]
         );
+    }
+
+    #[tokio::test]
+    async fn recent_roots_are_latest_first_and_few() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        assert_eq!(store.recent_roots().await.unwrap(), vec![]);
+        store.opened_root("/a", 10).await.unwrap();
+        store.opened_root("/b", 20).await.unwrap();
+        store.opened_root("/a", 30).await.unwrap();
+        assert_eq!(
+            store.recent_roots().await.unwrap(),
+            vec![("/a".to_owned(), 30), ("/b".to_owned(), 20)]
+        );
+        store.forget_root("/a").await.unwrap();
+        store.forget_root("/a").await.unwrap();
+        assert_eq!(store.recent_roots().await.unwrap().len(), 1);
+        for at in 0..RECENT_ROOTS + 5 {
+            store
+                .opened_root(&format!("/r{at}"), 100 + at)
+                .await
+                .unwrap();
+        }
+        let recent = store.recent_roots().await.unwrap();
+        assert_eq!(recent.len() as i64, RECENT_ROOTS);
+        assert_eq!(recent[0].0, format!("/r{}", RECENT_ROOTS + 4));
     }
 }

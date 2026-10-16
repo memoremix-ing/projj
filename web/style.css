@@ -137,6 +137,48 @@ kbd {
 .brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.01em; }
 .brand-root { color: var(--ink-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* The projj button opens the menu. */
+#menu-toggle {
+  height: 30px;
+  margin-left: -8px;
+  padding: 0 8px;
+  border-color: transparent;
+  background: none;
+  font-weight: 700;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+}
+#menu-toggle:hover, #menu-toggle[aria-expanded="true"] { border-color: var(--rule); background: var(--paper); }
+.brand-head { flex: none; }
+
+#menu {
+  position: fixed;
+  z-index: 20;
+  top: 46px;
+  bottom: 0;
+  left: 0;
+  width: min(300px, 86vw);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 10px;
+  border-right: 1px solid var(--rule);
+  background: var(--sheet);
+  box-shadow: 10px 0 30px rgb(0 0 0 / 0.12);
+}
+#menu[hidden] { display: none; }
+#menu-current { display: flex; flex-direction: column; gap: 1px; margin: 0 8px 12px; padding-bottom: 12px; border-bottom: 1px solid var(--rule-soft); }
+#menu-current .menu-label { color: var(--ink-faint); font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+#menu-current strong { font-size: 15px; }
+#menu-current .menu-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-soft); font: 12px var(--code); direction: rtl; text-align: left; }
+#menu-current .menu-path bdi { direction: ltr; }
+.menu-item { display: block; padding: 7px 8px; border-radius: 6px; color: var(--ink); text-decoration: none; }
+.menu-item:hover, .menu-item:focus-visible { background: var(--paper); }
+.menu-item[aria-current] { background: var(--pencil-wash); }
+
+/* While choosing a root there is nothing to review. */
+[data-mode="roots"] .review-only { display: none !important; }
 .brand-head { font: 12px var(--code); color: var(--ink-faint); white-space: nowrap; }
 
 .views { display: flex; gap: 2px; }
@@ -662,10 +704,27 @@ dialog p { margin: 0 0 16px; color: var(--ink-soft); }
   background: var(--sheet);
 }
 #explorer[hidden] { display: none; }
-#explorer-filter {
+/* The filter, with buttons for making a file or a folder beside it. */
+.explorer-bar { flex: none; display: flex; align-items: center; gap: 2px; margin: 8px 6px 6px 8px; }
+button.icon {
   flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-color: transparent;
+  background: none;
+  color: var(--ink-soft);
+}
+button.icon:hover { border-color: var(--rule); color: var(--ink); }
+button.icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+#explorer-filter {
+  flex: 1;
+  min-width: 0;
   height: 28px;
-  margin: 8px 8px 6px;
+  margin: 0 4px 0 0;
   padding: 0 8px;
   border: 1px solid var(--rule);
   border-radius: 6px;
@@ -712,6 +771,29 @@ dialog p { margin: 0 0 16px; color: var(--ink-soft); }
 }
 .tree-row .unsaved + .change { margin-left: 0; }
 .tree-note { margin: 8px 12px; font-size: 13px; color: var(--ink-soft); }
+
+/* Each row's own buttons show over its right end when it is pointed at. */
+.tree-item { position: relative; }
+.tree-actions {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  bottom: 0;
+  display: none;
+  align-items: center;
+  padding-left: 10px;
+  background: linear-gradient(to right, transparent, var(--paper) 10px);
+}
+.tree-item:hover .tree-actions, .tree-item:focus-within .tree-actions, .tree-actions:has(.armed) { display: flex; }
+button.tree-act { width: 22px; height: 22px; }
+button.tree-act svg { width: 13px; height: 13px; }
+button.tree-act.armed { width: auto; padding: 0 6px; border-color: var(--del-ink); color: var(--del-ink); font-size: 12px; }
+.tree-row.folder.here .name { color: var(--ink); }
+/* Naming something new, where it will go. */
+.tree-item.naming { display: flex; align-items: center; gap: 4px; padding-right: 8px; color: var(--ink-soft); }
+.tree-item.naming svg { flex: none; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.2; stroke-linecap: round; stroke-linejoin: round; }
+.tree-input { flex: 1; min-width: 0; height: 24px; padding: 0 6px; border: 1px solid var(--focus); border-radius: 4px; background: var(--paper); font: 13px var(--ui); }
+.tree-input:focus { outline: none; box-shadow: 0 0 0 2px var(--pencil-wash); }
 .open-row { display: flex; align-items: center; }
 .open-row .tree-row { flex: 1; min-width: 0; background: none; }
 .open-row .close {
@@ -918,3 +1000,114 @@ button.armed { border-color: var(--del-ink); color: var(--del-ink); }
 @media (prefers-reduced-motion: no-preference) {
   .stream, .detail, .log { scroll-behavior: smooth; }
 }
+
+/* Choosing a root */
+
+#roots { overflow: auto; }
+
+.roots-sheet {
+  width: min(760px, 100% - 32px);
+  margin: 12vh auto 40px;
+}
+.roots-sheet h1 { margin: 0 0 6px; font-size: 26px; letter-spacing: -0.015em; }
+.roots-lede { margin: 0 0 22px; max-width: 64ch; color: var(--ink-soft); }
+.roots-lede code { font: 12.5px var(--code); }
+
+.roots-find { display: flex; gap: 8px; align-items: flex-start; }
+.roots-box { position: relative; flex: 1; min-width: 0; }
+
+#roots-query {
+  width: 100%;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--sheet);
+  font-size: 16px;
+}
+#roots-query:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 3px var(--pencil-wash); }
+#roots-query[aria-expanded="true"] { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+/* A path is typed: show it as one. */
+#roots-query.typed { font: 14.5px var(--code); }
+#roots-choose { height: 44px; padding: 0 16px; border-radius: 8px; }
+
+#roots-list {
+  position: absolute;
+  z-index: 5;
+  top: 43px;
+  left: 0;
+  right: 0;
+  max-height: min(56vh, 520px);
+  margin: 0;
+  padding: 4px 0;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--focus);
+  border-top-color: var(--rule);
+  border-radius: 0 0 8px 8px;
+  background: var(--sheet);
+  box-shadow: 0 14px 30px rgb(0 0 0 / 0.12);
+}
+
+.roots-group {
+  padding: 8px 14px 3px;
+  color: var(--ink-faint);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.roots-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 4px 10px 4px 14px;
+  border-left: 3px solid transparent;
+  cursor: pointer;
+}
+.roots-option[aria-selected="true"] { background: var(--paper); border-left-color: var(--focus); }
+
+.roots-kind {
+  flex: none;
+  width: 76px;
+  padding: 1px 0;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+}
+.kind-projj .roots-kind { border-color: var(--highlighter); background: var(--highlighter-wash); color: var(--ink); }
+.kind-folder .roots-kind { border-style: dashed; }
+.kind-new .roots-kind { border-color: var(--stripe-b); background: var(--stripe-b-wash); color: var(--ink); font-weight: 600; }
+
+/* A long path gives up its leading folders, never its own name. */
+.roots-path { display: flex; flex: 1; min-width: 0; white-space: nowrap; font: 13px var(--code); }
+.roots-path .dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-faint); }
+.roots-path .name { flex: none; color: var(--ink); font-weight: 600; }
+
+.roots-action, .roots-when { flex: none; color: var(--ink-soft); font-size: 12.5px; white-space: nowrap; }
+.kind-new .roots-action { color: var(--ink); font-weight: 600; }
+.roots-forget { height: 22px; padding: 0 6px; visibility: hidden; }
+.roots-option:hover .roots-forget, .roots-option[aria-selected="true"] .roots-forget { visibility: visible; }
+
+#roots-status { min-height: 1.45em; margin: 10px 2px 0; color: var(--ink-soft); font-size: 13px; }
+.roots-keys { margin: 4px 2px 0; color: var(--ink-faint); font-size: 12.5px; }
+.roots-keys kbd { font-size: 11px; }
+
+/* An offer to start a root in a folder that is in no repository. */
+#roots-offer {
+  margin: 0 0 18px;
+  padding: 12px 16px 14px;
+  border: 1px solid var(--rule);
+  border-left: 4px solid var(--stripe-b);
+  border-radius: 8px;
+  background: var(--stripe-b-wash);
+}
+#roots-offer p { margin: 0 0 6px; }
+.roots-offer-path { font: 600 13.5px var(--code); }
+.roots-offer-note { color: var(--ink-soft); font-size: 13px; }
+.roots-offer-actions { display: flex; gap: 8px; margin-top: 10px; }

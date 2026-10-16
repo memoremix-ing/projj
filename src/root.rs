@@ -1,7 +1,10 @@
 //! Discovery of "projj-style" roots: a git repository for human review at the
 //! top, with jj workspaces for agents anywhere beneath it. By convention those
-//! live under `track/<host>/<tenant>/<repo>.git/` as `sdk-N/` workspaces that
-//! share the repository stored in a sibling `.repo/`.
+//! live under `track/<host>/<tenant>/<repo>.git/` as `sts-N/` or `lts-N/`
+//! workspaces that share the repository stored in a sibling `.repo/`.
+//!
+//! Any other git repository can be reviewed too; it just has no workspaces
+//! until it grows a `track/`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -25,7 +28,7 @@ pub const ROOT_WORKSPACE: &str = ".";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Workspace {
-    /// Directory name, e.g. `sdk-0`.
+    /// Directory name, e.g. `sts-0`.
     pub name: String,
     /// Path relative to the root, with forward slashes; `.` for the root
     /// itself. Used as the API key.
@@ -75,6 +78,174 @@ pub fn find_root(start: &Path) -> Result<PathBuf> {
             None => bail!("no projj root at or above {}", start.display()),
         };
     }
+}
+
+/// A root found for a path: a projj root (with `track/`) when there is one
+/// around the path, otherwise the innermost git repository holding it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Resolved {
+    pub root: PathBuf,
+    /// The root has a `track/` directory.
+    pub projj: bool,
+}
+
+/// Finds the root to review for `start`, or `None` if it is in no git
+/// repository. A path inside a `.git` directory counts as the repository's.
+pub fn resolve(start: &Path) -> Result<Option<Resolved>> {
+    let start = outside_git_dir(
+        &start
+            .canonicalize()
+            .with_context(|| format!("cannot resolve {}", start.display()))?,
+    );
+    if !start.is_dir() {
+        bail!("{} is not a folder", start.display());
+    }
+    let mut innermost = None;
+    let mut dir = start;
+    while let Some(toplevel) = git_toplevel(&dir)? {
+        if toplevel.join(TRACK_DIR).is_dir() {
+            return Ok(Some(Resolved {
+                root: toplevel,
+                projj: true,
+            }));
+        }
+        let Some(parent) = toplevel.parent().map(Path::to_owned) else {
+            break;
+        };
+        innermost.get_or_insert(toplevel);
+        dir = parent;
+    }
+    Ok(innermost.map(|root| Resolved { root, projj: false }))
+}
+
+/// `path` cut short before any `.git` component: the repository it belongs to.
+fn outside_git_dir(path: &Path) -> PathBuf {
+    let mut kept = PathBuf::new();
+    for component in path.components() {
+        if component.as_os_str() == ".git" {
+            break;
+        }
+        kept.push(component);
+    }
+    kept
+}
+
+/// What a folder someone has typed or chosen is, as far as opening it goes.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Place {
+    /// The folder is a root, or is inside one: that root is what opens.
+    Root {
+        #[serde(flatten)]
+        resolved: Resolved,
+        /// The folder is somewhere inside the root rather than the root.
+        inside: bool,
+    },
+    /// A folder in no git repository: a new root can be started in it.
+    Folder,
+    /// Nothing is there. A new root can be started there if the folder it
+    /// would go in exists.
+    Missing { creatable: bool },
+    /// A file rather than a folder.
+    File,
+}
+
+/// The path someone means (with `~` for their home), and what is there.
+pub fn inspect(path: &Path) -> Result<(PathBuf, Place)> {
+    let path = expand_home(path);
+    if !path.is_absolute() {
+        bail!("{} is not a full path", path.display());
+    }
+    let meta = match std::fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let creatable = path.parent().is_some_and(Path::is_dir);
+            return Ok((path, Place::Missing { creatable }));
+        }
+        Err(err) => return Err(err).with_context(|| format!("cannot look at {}", path.display())),
+    };
+    if !meta.is_dir() {
+        return Ok((path, Place::File));
+    }
+    let path = outside_git_dir(&path.canonicalize()?);
+    let place = match resolve(&path)? {
+        Some(resolved) => Place::Root {
+            inside: resolved.root != path,
+            resolved,
+        },
+        None => Place::Folder,
+    };
+    Ok((path, place))
+}
+
+/// `~` and `~/...` as the home directory.
+pub fn expand_home(path: &Path) -> PathBuf {
+    let home = || std::env::var_os("HOME").map(PathBuf::from);
+    match path.strip_prefix("~") {
+        Ok(rest) => match home() {
+            Some(home) => home.join(rest),
+            None => path.to_owned(),
+        },
+        Err(_) => path.to_owned(),
+    }
+}
+
+/// Starts a new projj root at `path`: a git repository with an empty
+/// `track/` for jj repositories to go in. Makes the folder first if it is
+/// missing and the folder it goes in exists. Refuses a folder that is
+/// already in a git repository.
+pub fn init(path: &Path) -> Result<PathBuf> {
+    init_with(path, Engine::detect())
+}
+
+fn init_with(path: &Path, engine: Engine) -> Result<PathBuf> {
+    let (path, place) = inspect(path)?;
+    match place {
+        Place::Folder => {}
+        Place::Missing { creatable: true } => {
+            let parent = path.parent().unwrap_or(&path);
+            if let Some(resolved) = resolve(parent)? {
+                bail!(
+                    "{} would be inside the git repository at {}",
+                    path.display(),
+                    resolved.root.display()
+                );
+            }
+            std::fs::create_dir(&path)
+                .with_context(|| format!("cannot make the folder {}", path.display()))?
+        }
+        Place::Missing { creatable: false } => {
+            bail!(
+                "{} does not exist",
+                path.parent().unwrap_or(&path).display()
+            )
+        }
+        Place::File => bail!("{} is a file", path.display()),
+        Place::Root { resolved, .. } => bail!(
+            "{} is already in the git repository at {}",
+            path.display(),
+            resolved.root.display()
+        ),
+    }
+    let path = path.canonicalize()?;
+    if engine == Engine::BuiltIn {
+        grit_lib::repo::init_repository(&path, false, "main", None, "files")
+            .map_err(|err| anyhow::anyhow!("cannot start a git repository: {err}"))?;
+    } else {
+        let output = git(&path)
+            .args(["init", "--quiet"])
+            .output()
+            .context("cannot run git")?;
+        if !output.status.success() {
+            bail!(
+                "git init failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+    std::fs::create_dir_all(path.join(TRACK_DIR))
+        .with_context(|| format!("cannot make {TRACK_DIR}/ in {}", path.display()))?;
+    Ok(path)
 }
 
 fn git(dir: &Path) -> Command {
@@ -331,10 +502,10 @@ mod tests {
         let repo = root.join("track/example.com/acme/widgets.git");
         // The store is a git repository of its own; the workspace is not.
         git_init(&repo.join(".repo"));
-        std::fs::create_dir_all(repo.join("sdk-0/src/deep")).unwrap();
+        std::fs::create_dir_all(repo.join("sts-0/src/deep")).unwrap();
         for start in [
             root.clone(),
-            repo.join("sdk-0/src/deep"),
+            repo.join("sts-0/src/deep"),
             repo.join(".repo"),
         ] {
             assert_eq!(find_root(&start).unwrap(), root, "{}", start.display());
@@ -362,8 +533,8 @@ mod tests {
         // The conventional layout: an ignored store with two workspaces.
         let widgets = root.join("track/example.com/acme/widgets.git");
         jj_repo(&widgets.join(".repo"));
-        jj_workspace(&widgets.join("sdk-0"), "../../.repo/.jj/repo");
-        jj_workspace(&widgets.join("sdk-1"), "../../.repo/.jj/repo");
+        jj_workspace(&widgets.join("sts-0"), "../../.repo/.jj/repo");
+        jj_workspace(&widgets.join("lts-1"), "../../.repo/.jj/repo");
         // A repository of its own, outside track/, that is not ignored.
         jj_repo(&root.join("tools/solo"));
         // A workspace of a repository kept outside the root.
@@ -396,8 +567,8 @@ mod tests {
                     own("track/example.com/acme/widgets.git/.repo"),
                     true,
                     vec![
-                        own("track/example.com/acme/widgets.git/sdk-0"),
-                        own("track/example.com/acme/widgets.git/sdk-1"),
+                        own("track/example.com/acme/widgets.git/lts-1"),
+                        own("track/example.com/acme/widgets.git/sts-0"),
                     ],
                 ),
                 (
@@ -423,10 +594,10 @@ mod tests {
         let orphan = &repos[4].workspaces[0];
         assert!(orphan.problem.as_ref().unwrap().contains("does not exist"));
         assert!(repos[1].workspaces[0].problem.is_none());
-        assert_eq!(repos[1].workspaces[0].name, "sdk-0");
+        assert_eq!(repos[1].workspaces[1].name, "sts-0");
 
-        let inside = "track/example.com/acme/widgets.git/sdk-1/src/a.rs";
-        assert_eq!(workspace_for(&repos, inside).unwrap().name, "sdk-1");
+        let inside = "track/example.com/acme/widgets.git/lts-1/src/a.rs";
+        assert_eq!(workspace_for(&repos, inside).unwrap().name, "lts-1");
         assert!(workspace_for(&repos, "README.md").is_none());
         assert!(workspace_for(&repos, "tools/solo-notes.md").is_none());
         // Git reports a nested repository as the directory itself.
@@ -457,5 +628,85 @@ mod tests {
         assert_eq!(workspace_for(&repos, "README.md").unwrap().path, ".");
         let nested = workspace_for(&repos, "track/nested/a.rs").unwrap();
         assert_eq!(nested.path, "track/nested");
+    }
+
+    #[test]
+    fn resolves_projj_roots_then_plain_repositories() {
+        let (dir, root) = scratch_root();
+        let store = root.join("track/example.com/acme/widgets.git/.repo");
+        git_init(&store);
+        let projj = |root: &Path| Resolved {
+            root: root.to_owned(),
+            projj: true,
+        };
+        assert_eq!(resolve(&store).unwrap(), Some(projj(&root)));
+        assert_eq!(
+            resolve(&root.join(".git/refs")).unwrap(),
+            Some(projj(&root))
+        );
+
+        let plain = dir.path().canonicalize().unwrap().join("plain");
+        git_init(&plain.join("inner"));
+        git_init(&plain);
+        std::fs::create_dir_all(plain.join("src")).unwrap();
+        let resolved = resolve(&plain.join("src")).unwrap().unwrap();
+        assert_eq!((resolved.root, resolved.projj), (plain.clone(), false));
+        // The innermost repository, when none has a track/.
+        let inner = resolve(&plain.join("inner")).unwrap().unwrap();
+        assert_eq!(inner.root, plain.join("inner"));
+
+        let loose = dir.path().canonicalize().unwrap().join("loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        assert_eq!(resolve(&loose).unwrap(), None);
+    }
+
+    #[test]
+    fn inspects_what_someone_typed() {
+        let (dir, root) = scratch_root();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("track/deep")).unwrap();
+        std::fs::create_dir_all(base.join("loose")).unwrap();
+        std::fs::write(base.join("file.txt"), "").unwrap();
+
+        let (path, place) = inspect(&root.join("track/deep")).unwrap();
+        assert_eq!(path, root.join("track/deep"));
+        assert!(matches!(place, Place::Root { inside: true, resolved } if resolved.root == root));
+        let (_, place) = inspect(&root.join(".git")).unwrap();
+        assert!(matches!(place, Place::Root { inside: false, .. }));
+        assert_eq!(inspect(&base.join("loose")).unwrap().1, Place::Folder);
+        assert_eq!(inspect(&base.join("file.txt")).unwrap().1, Place::File);
+        assert_eq!(
+            inspect(&base.join("new")).unwrap().1,
+            Place::Missing { creatable: true }
+        );
+        assert_eq!(
+            inspect(&base.join("no/such")).unwrap().1,
+            Place::Missing { creatable: false }
+        );
+        assert!(inspect(Path::new("relative/path")).is_err());
+    }
+
+    #[test]
+    fn starts_new_roots() {
+        for engine in [Engine::Installed, Engine::BuiltIn] {
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().canonicalize().unwrap();
+            std::fs::create_dir_all(base.join("existing")).unwrap();
+            for path in [base.join("existing"), base.join("fresh")] {
+                let root = init_with(&path, engine).unwrap();
+                assert_eq!(root, path);
+                assert!(root.join(TRACK_DIR).is_dir());
+                let output = git(&root).args(["status", "--porcelain"]).output().unwrap();
+                assert!(output.status.success(), "{engine:?}");
+                assert_eq!(find_root(&root).unwrap(), root);
+            }
+            // Never inside another repository, nor where there is no folder.
+            std::fs::create_dir_all(base.join("fresh/sub")).unwrap();
+            let err = init_with(&base.join("fresh/sub"), engine).unwrap_err();
+            assert!(err.to_string().contains("already in the git repository"));
+            let err = init_with(&base.join("fresh/inner"), engine).unwrap_err();
+            assert!(err.to_string().contains("would be inside"));
+            assert!(init_with(&base.join("no/such"), engine).is_err());
+        }
     }
 }

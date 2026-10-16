@@ -13,8 +13,8 @@ git init -q -b main
 R="$S/track/example.com/acme/widgets.git"
 mkdir -p "$R/.repo"
 (cd "$R/.repo" && jj --quiet git init --colocate)
-(cd "$R/.repo" && jj --quiet workspace add --name sdk-0 ../sdk-0)
-cd "$R/sdk-0"
+(cd "$R/.repo" && jj --quiet workspace add --name sts-0 ../sts-0)
+cd "$R/sts-0"
 printf 'target/\n' > .gitignore
 mkdir -p src docs
 python3 - <<'PY'
@@ -33,7 +33,7 @@ cd "$S"
 printf '.jj/\ntrack/*/*/*/.repo/\n' > .gitignore
 git add -A
 git -c user.name=t -c user.email=t@example.com commit -q -m base
-cd "$R/sdk-0"
+cd "$R/sts-0"
 python3 - <<'PY'
 import os
 s=open('src/lib.rs').read()

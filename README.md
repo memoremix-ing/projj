@@ -8,8 +8,8 @@ code, on top of jj repositories that agents use to write it.
   .git/                                  review state (human)
   track/<host>/<tenant>/<repo>.git/
     .repo/                               the jj repository; ignored by git, never edited
-    sdk-0/                               jj workspace tracking major version 0
-    sdk-1/                               jj workspace tracking major version 1
+    sts-0/                               jj workspace on branch sts-0 (short-term support, major version 0)
+    lts-1/                               jj workspace on branch lts-1 (long-term support, major version 1)
 ```
 
 Today projj is one thing, a review tool for such a root, in two forms: the
@@ -37,8 +37,9 @@ deliberate step in a terminal, and everything projj does to the index is
 visible to, and undoable with, plain `git`.
 
 Reviewing never changes a file. The only way projj writes to the worktree is
-the editor described under Views, when you save in it, and a save stages
-nothing: the edit is simply one more change to review.
+the editor described under Views, when you save in it or make, rename or
+delete a file or folder there, and none of that stages anything: each is simply one
+more change to review.
 
 jj history is read through `jj-lib`, without snapshotting working copies or
 writing operations, so browsing cannot disturb an agent working in the same
@@ -57,9 +58,34 @@ cargo run -- jj log                # the jj built into projj
 The root is found by asking git (`git rev-parse --show-toplevel`) which
 repository contains the current directory, so `serve` works from anywhere
 inside a root. If that repository has no `track/` directory (it is the git
-store behind a `.repo`, say), the search continues from its parent. From
-outside a root, pass `--root <path>` with any path inside one. `--port`
-changes the port.
+store behind a `.repo`, say), the search continues from its parent; if none
+around it has one, the innermost repository is reviewed as it is. `--root
+<path>` starts from another path instead. `--port` changes the port.
+
+Started outside any repository, `serve` opens on a page for choosing a root
+instead, and offers to start one in the folder it was started in. The same
+page is a click away from any review: the projj button at the top left
+opens a side panel with "Choose a projj" in it. So one server reviews any
+number of roots, each in its own tab if you like. One box does the choosing:
+
+- **Words** search the repositories on the device, those opened lately
+  first, then projj roots. The home folder is looked through in the
+  background the first time the page asks, shallow folders first; hidden
+  folders, `node_modules`, `target`, `~/Library` and the like are skipped,
+  and nothing inside a repository is looked at, so `.repo` stores and
+  vendored clones are not offered.
+- **A path** (starting with `/` or `~`) completes folder by folder, with Tab
+  as in a shell. A folder that is in no repository, or one that does not
+  exist yet, is offered as a new root: a git repository with an empty
+  `track/`, made with the installed git or the built-in one. Nothing else is
+  written, and a folder inside a repository is never offered.
+- **Choose folder…** shows the system's folder dialog (on macOS through
+  `osascript`, on Linux zenity or kdialog, on Windows PowerShell). A browser
+  cannot say where a folder it was given is, so the server asks for one
+  itself; it is on the same device, for the person at it.
+
+Each page names its root in every request (see "HTTP API"), so tabs on
+different roots never act on each other's.
 
 The server can change the git index and files under the root, so it lets in
 only the browser it was meant for. It listens on `127.0.0.1` only, and prints
@@ -182,8 +208,27 @@ you can review any of them as a diff, or discard them one by one or all at
 once.
 
 Line endings are kept as they were; files that are binary, not UTF-8, over
-2 MB, or of mixed line endings are left to a real editor. The explorer opens
-existing files only; it does not create, rename, or delete.
+2 MB, or of mixed line endings are left to a real editor.
+
+The explorer makes, renames and deletes files and folders too, so a root
+just started can be filled from the page. The two buttons beside its filter
+make a file or a folder in the folder last clicked (or that of the file last
+opened); each folder row has the same two, and every row a rename and a
+delete button, showing when the row is pointed at. A name may run through folders that do not
+exist yet (`docs/guide/intro.md`); they are made on the way. A new file
+opens in the editor. Delete takes a second press, and its tooltip says
+whether git can bring back what goes; a folder that holds a repository or a
+jj workspace (a `.git`, `.jj` or `.repo` anywhere inside) is refused. A new
+folder with nothing in it shows until the page is reloaded, since git lists
+files, not folders.
+
+Rename (the row's button, or F2 on a focused row) edits the whole path, with
+the name selected, so it moves things as well: `notes/a.md` to
+`docs/a.md`. Folders on the way are made, nothing is replaced, and open files
+follow. Files with unsaved edits have to be saved or discarded first, and a
+folder holding a repository or a jj workspace stays put, since jj finds a
+workspace's repository by a relative path. Git sees a rename as a deletion
+and a new file, to review like any other.
 
 The Layout control switches every diff between unified and side by side. Side
 by side puts each run of removed lines next to the lines that replaced it;
@@ -228,9 +273,9 @@ changes.
 
 ## What is kept on the device
 
-Text typed in the editor and not yet saved, and display settings (theme,
+Text typed in the editor and not yet saved, display settings (theme,
 layout, context, the Tweaks, the widths of the file lists, the editor's size
-and whether its file list shows), are kept by
+and whether its file list shows), and the 30 roots opened last are kept by
 the server, not by the browser, in one [Turso](https://docs.turso.tech/)
 database for the whole device:
 
@@ -265,18 +310,35 @@ Everything the web client does goes through this JSON API. From a script,
 redeem a link as a browser would (follow `/?token=…` once and keep the
 `projj-<port>` cookie it sets), then send that cookie. The desktop app makes
 the same calls, in process. Errors are `{"error": "..."}` with status 400 (bad
-input), 404 (unknown workspace), or 409 (the repository changed underneath the
-request; refetch and retry).
+input), 404 (unknown workspace or root), or 409 (the repository changed
+underneath the request; refetch and retry).
+
+Requests about a root (everything from `/api/root` down to `/api/jj/snapshot`
+below) name it in an `X-Projj-Root` header: the absolute path of the top of a
+git repository, written with `encodeURIComponent`. The server keeps no
+"current" root. Choosing one needs none:
 
 | Method and path | Parameters | Result |
 | --- | --- | --- |
-| `GET /api/root` | | Root path, repositories, workspaces |
+| `GET /api/start` | | What a page naming no root should do: the root `serve` started in (`root`), else where it started if that is in no repository (`here`), and whether a folder chooser can be shown |
+| `GET /api/roots` | `q` | Roots to choose: `hits`, each `{path, label, kind, opened}` with `kind` `projj`, `git` or `folder`; `scanning` while the device is still being looked through. A `q` starting with `/` or `~` is a path: its completions, and what is at it (`typed`) |
+| `GET /api/roots/inspect` | `path` | What is at a path: `kind` is `root` (with the `root` it opens, `projj`, and `inside`), `folder`, `missing` (with `creatable`) or `file` |
+| `POST /api/roots/init` | `{path}` | Start a new root there; 409 if it is in a repository already |
+| `POST /api/roots/choose` | `{start?}` | Show the folder chooser and wait; what was chosen, as `inspect` says, or `null`. 404 if there is none, 409 if one is open |
+| `DELETE /api/roots/recent` | `path` | Take a root off the recent list |
+
+| Method and path (`X-Projj-Root`) | Parameters | Result |
+| --- | --- | --- |
+| `GET /api/root` | | Root path, repositories, workspaces; puts it first among the recent roots |
 | `GET /api/review/status` | | Branch, `HEAD`, and changed files with line counts per side |
 | `GET /api/review/diff` | `path`, `side` (`unstaged`\|`staged`), `context` | One file's hunks, or `null` |
 | `POST /api/review/apply` | `{action, path, hunk, lines?, context?}` | Stage or unstage a hunk or some of its lines |
 | `POST /api/review/apply-files` | `{action, paths}` | Stage or unstage whole files |
 | `GET /api/file` | `path` | A worktree text file: `content`, `eol`, `version` |
 | `POST /api/file` | `{path, content, eol, base?}` | Rewrite an existing file; 409 if it is no longer at version `base` |
+| `POST /api/file/create` | `{path, kind}` | Make an empty file, or a folder (`kind` `file` or `folder`), with any folders on the way; 409 if something is there |
+| `POST /api/file/rename` | `{from, to}` | Rename or move a file or a folder, with any folders on the way: `{kind, path}`. 409 if something is at `to`; a folder holding a `.git`, `.jj` or `.repo` is refused (400) |
+| `DELETE /api/file` | `path` | Delete a file, or a folder and all in it: `{kind}`. A folder holding a `.git`, `.jj` or `.repo` is refused (400) |
 | `POST /api/file/rebase` | `{path, base, content}` | Three-way merge of edited `content` and the file on disk, both started from `base`: `status` is `unchanged`, `merged` (with the result in `content`), or `conflict`, plus the diffs `mine`, `theirs`, `merged` against `base`. Writes nothing |
 | `GET /api/settings` | | Display settings: `{settings}`, each a JSON value by name |
 | `POST /api/settings` | `{key, value}` | Keep one setting; a `null` value forgets it |
@@ -302,7 +364,9 @@ into that hunk's `lines`.
 
 | Path | Role |
 | --- | --- |
-| `src/root.rs` | Finds the root, its jj workspaces, and the repository behind each |
+| `src/root.rs` | Finds the root, its jj workspaces, and the repository behind each; starts new roots |
+| `src/finder.rs` | Looks for repositories on the device, searches them, completes typed paths |
+| `src/chooser.rs` | The system's folder dialog, for `projj serve` |
 | `src/git.rs` | Review state: status, per-file diffs, patch building, staging |
 | `src/git_builtin.rs` | The built-in git, for machines without one, and its tests against real git |
 | `src/jj.rs` | jj history through `jj-lib`: revsets, graph, diffs, evolution |
@@ -310,7 +374,7 @@ into that hunk's `lines`.
 | `src/syntax.rs` | Syntax tokens for diff lines |
 | `src/files.rs` | Reading and saving worktree files for the editor |
 | `src/bundled_jj.rs` | jj's command line, built in: `projj jj` and the snapshot button |
-| `src/store.rs` | The device-wide store: unsaved editor text and display settings |
+| `src/store.rs` | The device-wide store: unsaved editor text, display settings, recent roots |
 | `src/api.rs` | The API's routes, and `Local` for calling them in process |
 | `src/gate.rs` | Who may use `projj serve`: one-time links, sessions, origin checks |
 | `web/` | Client, embedded in the binary; plain HTML, CSS, and JS |
@@ -349,10 +413,18 @@ it load, and that marking a hunk or a whole file reviewed brings up what
 followed it in its place. Most run with and without the browser's scroll
 anchoring, which Safari lacks. Others check that Tweaks apply at once, follow
 to a second server on another port, stay apart for light and dark, and export
-and import as JSON, and that a browser not given the link is shut out. The
-harness redeems each server's link itself and hands the session to the
-browser. `--headed` shows the browser, `--only <name>` picks
+and import as JSON, and that a browser not given the link is shut out. One
+starts a server in a folder outside any repository and chooses roots
+through the page: by search, by a typed path, by starting new ones, and
+through the menu back, and another fills a new root from the editor:
+making files and folders, renaming and moving them, and deleting them. The harness redeems each server's link itself
+and hands the session to the browser. `--headed` shows the browser, `--only <name>` picks
 tests, `CHROME` and `PROJJ_BIN` choose the binaries.
+
+`PROJJ_SEARCH_DIRS` (a list, like `PATH`) makes root search look there
+instead of the home folder, and `PROJJ_FOLDER_CHOOSER` names a program to
+run instead of the system's folder dialog: it is given the folder to start
+in and prints the one chosen, or nothing. The tests use both.
 
 ## Known limits
 
@@ -371,6 +443,11 @@ tests, `CHROME` and `PROJJ_BIN` choose the binaries.
   same time. The database file itself is in SQLite's format. The mode needs a
   local filesystem on a 64-bit Unix; elsewhere a second server cannot open
   the store while the first is running.
+- Root search looks seven folders deep below the home folder, and at most
+  250,000 folders; a repository further down is reached by typing its path
+  or choosing its folder. On macOS, looking through Desktop, Documents or
+  Downloads may make the system ask, once, whether the terminal (or the
+  desktop app) may.
 - Unsaved edits are filed by the root's path. Moving a root leaves its edits
   behind under the old path, where `projj drafts` still lists them.
 - Two pages open on the same root do not see each other's unsaved edits until

@@ -3833,6 +3833,7 @@ dependencies = [
  "hex",
  "jj-cli",
  "jj-lib",
+ "percent-encoding",
  "pollster 1.0.1",
  "serde",
  "serde_json",

@@ -7,8 +7,10 @@
 
 pub mod api;
 pub mod bundled_jj;
+pub mod chooser;
 mod diff;
 mod files;
+pub mod finder;
 pub mod gate;
 mod git;
 mod git_builtin;
@@ -16,3 +18,6 @@ pub mod jj;
 pub mod root;
 pub mod store;
 mod syntax;
+
+/// Which git answers: the one installed, or the one built in.
+pub use git::Engine;

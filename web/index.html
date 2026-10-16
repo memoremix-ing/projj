@@ -13,22 +13,22 @@
 <body>
 <header class="bar">
   <div class="brand">
-    <span class="brand-name">projj</span>
-    <span class="brand-root" id="root-name"></span>
-    <span class="brand-head" id="root-head"></span>
+    <button type="button" id="menu-toggle" class="brand-name" aria-expanded="false" aria-controls="menu" title="Menu">projj</button>
+    <span class="brand-root review-only" id="root-name"></span>
+    <span class="brand-head review-only" id="root-head"></span>
   </div>
-  <nav class="views" aria-label="Views">
+  <nav class="views review-only" aria-label="Views">
     <button type="button" data-view="review" aria-pressed="true">Review</button>
     <button type="button" data-view="history" aria-pressed="false">History</button>
   </nav>
   <div class="bar-tools">
-    <label class="field">Layout
+    <label class="field review-only">Layout
       <select id="layout">
         <option value="unified">Unified</option>
         <option value="split">Side by side</option>
       </select>
     </label>
-    <label class="field">Context
+    <label class="field review-only">Context
       <select id="context">
         <option value="3">3 lines</option>
         <option value="10">10 lines</option>
@@ -36,13 +36,35 @@
         <option value="100000">Whole file</option>
       </select>
     </label>
-    <button type="button" id="editor-toggle" aria-pressed="false" title="Show or hide the editor">Editor</button>
-    <button type="button" id="refresh" title="Reload from disk">Reload</button>
+    <button type="button" id="editor-toggle" class="review-only" aria-pressed="false" title="Show or hide the editor">Editor</button>
+    <button type="button" id="refresh" class="review-only" title="Reload from disk">Reload</button>
     <button type="button" id="theme" title="Switch between light and dark">Theme</button>
     <button type="button" id="tweaks-open" aria-pressed="false" title="Adjust colors and type for reading">Tweaks</button>
-    <button type="button" id="help-open" title="Keyboard shortcuts (?)">Keys</button>
+    <button type="button" id="help-open" class="review-only" title="Keyboard shortcuts (?)">Keys</button>
   </div>
 </header>
+
+<nav id="menu" aria-label="projj" hidden>
+  <div id="menu-current"></div>
+  <a class="menu-item" id="menu-choose" href="?roots">Choose a projj</a>
+</nav>
+
+<main id="roots" class="view" hidden>
+  <div class="roots-sheet">
+    <h1>Open a root</h1>
+    <p class="roots-lede">A root is a git repository to review, usually with the jj repositories agents work in under its <code>track/</code> folder. Search the repositories on this device, type a path, or choose a folder.</p>
+    <div id="roots-offer" hidden></div>
+    <div class="roots-find">
+      <div class="roots-box">
+        <input id="roots-query" type="text" role="combobox" aria-expanded="false" aria-controls="roots-list" aria-autocomplete="list" aria-label="Search repositories, or type a path" placeholder="Search repositories, or type a path like ~/code/thing" spellcheck="false" autocomplete="off" autocapitalize="off">
+        <ul id="roots-list" role="listbox" aria-label="Roots" hidden></ul>
+      </div>
+      <button type="button" id="roots-choose" hidden>Choose folder…</button>
+    </div>
+    <p id="roots-status" role="status"></p>
+    <p class="roots-keys"><kbd>↑</kbd> <kbd>↓</kbd> to move, <kbd>Enter</kbd> to open, <kbd>Tab</kbd> to go into a folder</p>
+  </div>
+</main>
 
 <main id="review" class="view">
   <aside class="side" aria-label="Files">
@@ -89,7 +111,15 @@
   </header>
   <div class="editor-main">
     <aside id="explorer" aria-label="Files">
-      <input id="explorer-filter" type="search" placeholder="Find a file" spellcheck="false" autocomplete="off" aria-label="Find a file">
+      <div class="explorer-bar">
+        <input id="explorer-filter" type="search" placeholder="Find a file" spellcheck="false" autocomplete="off" aria-label="Find a file">
+        <button type="button" id="explorer-new-file" class="icon" aria-label="New file" title="New file">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.5h5l3.5 3.5v9.5h-8.5z M9 1.5v3.5h3.5" /><path d="M8 8v5 M5.5 10.5h5" /></svg>
+        </button>
+        <button type="button" id="explorer-new-folder" class="icon" aria-label="New folder" title="New folder">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z" /><path d="M8 7v5 M5.5 9.5h5" /></svg>
+        </button>
+      </div>
       <div id="explorer-open" hidden></div>
       <div id="explorer-tree"></div>
     </aside>

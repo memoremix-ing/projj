@@ -6,8 +6,11 @@
 //! device, and no web page, can reach the API. (Electrobun's own loopback
 //! socket is another matter; see `open_window`.)
 //!
-//! Each window reviews one root. File > Open Folder… opens another, and the
-//! roots open at quitting are reopened at the next start.
+//! Each window reviews one root, or helps choose one: the same chooser the
+//! page shows `projj serve` users, with the app's own folder dialog behind
+//! its Choose folder… button. File > New Window opens another chooser, File >
+//! Open Folder… goes straight to a folder, and the roots open at quitting are
+//! reopened at the next start.
 
 use std::ffi::c_char;
 use std::path::Path;
@@ -74,8 +77,9 @@ struct Desktop {
     bundle: BundlePaths,
     packaged: bool,
     runtime: tokio::runtime::Runtime,
-    data_dir: PathBuf,
     settings: store::Store,
+    /// Every window's page talks to this one app; each request names its root.
+    api: api::Local,
     windows: Mutex<Vec<Window>>,
     focused: AtomicU32,
     /// Requests from pages that have not been answered yet.
@@ -86,8 +90,8 @@ struct Desktop {
 struct Window {
     window_id: u32,
     webview_id: u32,
-    root: PathBuf,
-    api: api::Local,
+    /// The root the page says it shows; `None` while it is choosing one.
+    root: Option<PathBuf>,
 }
 
 static DESKTOP: OnceLock<Desktop> = OnceLock::new();
@@ -118,13 +122,16 @@ fn run() -> Result<(), String> {
         .enable_all()
         .build()
         .map_err(|err| format!("cannot start: {err}"))?;
+    let jj = jj::Jj::load().map_err(|err| format!("{err:#}"))?;
+    let app = api::App::new(jj, None, store::Store::new(&data_dir))
+        .with_chooser(Some(std::sync::Arc::new(choose_folder)));
     let desktop = Desktop {
         core,
         bundle,
         packaged: app_info.is_packaged(),
         runtime,
         settings: store::Store::new(&data_dir),
-        data_dir,
+        api: api::Local::new(Arc::new(app)),
         windows: Mutex::default(),
         focused: AtomicU32::new(0),
         busy: AtomicUsize::new(0),
@@ -185,7 +192,7 @@ fn start() {
     for root in remembered_roots() {
         opened |= Path::new(&root).is_dir() && open_root(Path::new(&root));
     }
-    if !opened && !choose_root() {
+    if !opened && !open_page(None, "") {
         let _ = d.core.stop_event_loop();
     }
 }
@@ -207,6 +214,7 @@ fn menu(packaged: bool) -> String {
             { "role": "quit" },
         ]},
         { "label": "File", "submenu": [
+            { "label": "New Window", "action": "new-window", "accelerator": "n" },
             { "label": "Open Folder…", "action": "open-folder", "accelerator": "o" },
             { "type": "separator" },
             { "role": "close" },
@@ -235,7 +243,8 @@ extern "C" fn menu_clicked(_: u32, action: *const c_char) {
         .map(|window| window.webview_id);
     match electrobun::c_string_to_string(action).as_str() {
         // Off the main thread: the dialog waits for the person.
-        "open-folder" => drop(thread::spawn(choose_root)),
+        "open-folder" => drop(thread::spawn(open_folder)),
+        "new-window" => drop(thread::spawn(|| open_page(None, ""))),
         "reload" => {
             if let Some(webview) = webview {
                 let _ = d.core.reload_webview(webview);
@@ -250,83 +259,91 @@ extern "C" fn menu_clicked(_: u32, action: *const c_char) {
     }
 }
 
-/// Asks for a folder and opens the root it is in. False if none was opened.
-fn choose_root() -> bool {
-    let d = desktop();
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    let picked = d.core.open_file_dialog(OpenFileDialogOptions {
-        starting_folder: &home,
-        allowed_file_types: "*",
-        can_choose_files: false,
-        can_choose_directory: true,
-        allows_multiple_selection: false,
-    });
-    let picked = match picked {
-        Ok(picked) if !picked.trim().is_empty() => picked,
-        Ok(_) => return false,
-        Err(err) => {
-            complain("The folder could not be chosen", &err);
-            return false;
-        }
+/// The app's folder dialog, starting in `start`. `None` if cancelled. This
+/// is what the page's Choose folder… button shows.
+fn choose_folder(start: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let start = start.display().to_string();
+    let picked = desktop()
+        .core
+        .open_file_dialog(OpenFileDialogOptions {
+            starting_folder: &start,
+            allowed_file_types: "*",
+            can_choose_files: false,
+            can_choose_directory: true,
+            allows_multiple_selection: false,
+        })
+        .map_err(|err| anyhow::anyhow!("the folder could not be chosen: {err}"))?;
+    if picked.trim().is_empty() {
+        return Ok(None);
+    }
+    let paths: Vec<String> = serde_json::from_str(&picked)?;
+    Ok(paths.into_iter().next().map(PathBuf::from))
+}
+
+/// File > Open Folder…: the root around the chosen folder, or, for a folder
+/// in no repository, a chooser offering to start one there.
+fn open_folder() {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/".into());
+    let path = match choose_folder(&home) {
+        Ok(Some(path)) => path,
+        Ok(None) => return,
+        Err(err) => return complain("The folder could not be chosen", &format!("{err:#}")),
     };
-    match serde_json::from_str::<Vec<String>>(&picked) {
-        Ok(paths) => paths.first().is_some_and(|path| open_root(Path::new(path))),
-        Err(err) => {
-            complain("The folder could not be chosen", &err.to_string());
-            false
-        }
+    match root::resolve(&path) {
+        Ok(Some(resolved)) => drop(open_root(&resolved.root)),
+        _ => drop(open_page(
+            None,
+            &format!("?roots&path={}", encode(&path.display().to_string())),
+        )),
     }
 }
 
-/// Opens a window on the root containing `path`, or brings forward the one
-/// already open on it. False, after telling the person why, if there is none.
-fn open_root(path: &Path) -> bool {
+/// Brings forward the window showing `root`, or opens one on it.
+fn open_root(root: &Path) -> bool {
     let d = desktop();
-    let root = match root::find_root(path) {
-        Ok(root) => root,
-        Err(err) => {
-            complain(
-                "That folder is not in a projj root",
-                &format!(
-                    "{err:#}\n\nChoose the folder of a git repository that has a track/ folder, \
-                     or any folder inside one."
-                ),
-            );
-            return false;
-        }
-    };
     let open = d
         .windows
         .lock()
         .unwrap()
         .iter()
-        .find(|window| window.root == root)
+        .find(|window| window.root.as_deref() == Some(root))
         .map(|window| window.window_id);
     if let Some(window_id) = open {
         let _ = d.core.show_window(window_id, true);
         return true;
     }
-    match open_window(&root) {
+    let query = format!("?root={}", encode(&root.display().to_string()));
+    open_page(Some(root), &query)
+}
+
+/// A new window on the page, with `query` as its address's: a root, or the
+/// chooser. False, after telling the person why, if it could not be opened.
+fn open_page(root: Option<&Path>, query: &str) -> bool {
+    match open_window(root, query) {
         Ok(()) => {
             remember_roots();
             true
         }
         Err(err) => {
-            complain(&format!("{} could not be opened", root.display()), &err);
+            complain("projj could not open a window", &err);
             false
         }
     }
 }
 
-fn open_window(root: &Path) -> Result<(), String> {
+/// As the page's `encodeURIComponent`.
+fn encode(text: &str) -> String {
+    percent_encoding::utf8_percent_encode(text, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
+fn open_window(root: Option<&Path>, query: &str) -> Result<(), String> {
     let d = desktop();
-    let jj = jj::Jj::load().map_err(|err| format!("{err:#}"))?;
-    let app = api::App::new(root.to_owned(), jj, None, store::Store::new(&d.data_dir));
-    let name = root
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| root.display().to_string());
-    let title = format!("{name} — projj");
+    let title = match root.and_then(Path::file_name) {
+        Some(name) => format!("{} — projj", name.to_string_lossy()),
+        None => "projj".to_owned(),
+    };
     let frame = Rect::new(120.0, 80.0, 1360.0, 900.0);
     let mut options = WindowOptions::new(&title, frame);
     options.centered = true;
@@ -342,9 +359,10 @@ fn open_window(root: &Path) -> Result<(), String> {
     // What arrives there is only taken if sealed with this window's key, so
     // the key must be one nothing else can know.
     let key = secret_key();
+    let url = format!("{PAGE}{query}");
     let mut web = WebviewOptions::new(
         window_id,
-        PAGE,
+        &url,
         Rect::new(0.0, 0.0, frame.width, frame.height),
     );
     web.renderer = Renderer::Cef;
@@ -373,8 +391,7 @@ fn open_window(root: &Path) -> Result<(), String> {
     d.windows.lock().unwrap().push(Window {
         window_id,
         webview_id,
-        root: root.to_owned(),
-        api: api::Local::new(Arc::new(app)),
+        root: root.map(Path::to_owned),
     });
     d.focused.store(window_id, Ordering::Release);
     Ok(())
@@ -425,34 +442,40 @@ fn answer_pages() {
     }
 }
 
-/// A page's request: `{ type: "projj", id, method, path, body }`, answered
-/// with `{ type: "projj", id, status, body }`. See `desktopBridge` in app.js.
+/// A page's request: `{ type: "projj", id, method, path, root, body }`,
+/// answered with `{ type: "projj", id, status, body }`; or word of what the
+/// window shows, `{ type: "projj-window", root, title }`. See
+/// `desktopBridge` in app.js.
 fn answer(webview_id: u32, message: &str) {
     let d = desktop();
     let Ok(message) = serde_json::from_str::<Value>(message) else {
         return;
     };
+    if message["type"] == "projj-window" {
+        return showing(webview_id, &message);
+    }
     if message["type"] != "projj" {
         return;
     }
-    let Some(api) = d
+    let known = d
         .windows
         .lock()
         .unwrap()
         .iter()
-        .find(|window| window.webview_id == webview_id)
-        .map(|window| window.api.clone())
-    else {
+        .any(|window| window.webview_id == webview_id);
+    if !known {
         return;
-    };
+    }
+    let api = d.api.clone();
     let id = message["id"].clone();
     let method = message["method"].as_str().unwrap_or("GET").to_owned();
     let path = message["path"].as_str().unwrap_or_default().to_owned();
+    let root = message["root"].as_str().map(str::to_owned);
     let body = message["body"].as_str().unwrap_or_default().to_owned();
     d.busy.fetch_add(1, Ordering::AcqRel);
     d.runtime.spawn(async move {
         let (status, body) = if path.starts_with("/api/") {
-            api.call(&method, &path, body).await
+            api.call(&method, &path, root.as_deref(), body).await
         } else {
             (404, json!({ "error": "not an API path" }).to_string())
         };
@@ -467,6 +490,24 @@ fn answer(webview_id: u32, message: &str) {
         }
         d.busy.fetch_sub(1, Ordering::AcqRel);
     });
+}
+
+/// The page has opened a root, or gone to choose one: the window takes its
+/// title, and is reopened on that root next time.
+fn showing(webview_id: u32, message: &Value) {
+    let d = desktop();
+    let root = message["root"].as_str().map(PathBuf::from);
+    let window_id = {
+        let mut windows = d.windows.lock().unwrap();
+        let Some(window) = windows.iter_mut().find(|w| w.webview_id == webview_id) else {
+            return;
+        };
+        window.root = root;
+        window.window_id
+    };
+    let title = message["title"].as_str().unwrap_or("projj");
+    let _ = d.core.set_window_title(window_id, title);
+    remember_roots();
 }
 
 /// Cmd+Q, closing the last window, or a signal: let every page hand over
@@ -531,7 +572,8 @@ fn remember_roots() {
         .lock()
         .unwrap()
         .iter()
-        .map(|window| window.root.display().to_string())
+        .filter_map(|window| window.root.as_ref())
+        .map(|root| root.display().to_string())
         .collect();
     d.busy.fetch_add(1, Ordering::AcqRel);
     d.runtime.spawn(async move {

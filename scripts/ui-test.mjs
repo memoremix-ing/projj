@@ -10,7 +10,7 @@
 // the first Chrome found and target/release/projj (or target/debug/projj).
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,8 +40,8 @@ function fail(message) {
 const LINK = /projj: open (http:\/\/[^/\s]+)\/\?token=[0-9a-f]{64}/;
 
 /** Starts a process and resolves with the first match of `pattern` in its output. */
-function launch(command, argv, env, pattern) {
-  const child = spawn(command, argv, { env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
+function launch(command, argv, env, pattern, cwd) {
+  const child = spawn(command, argv, { cwd, env: { ...process.env, ...env }, stdio: ["ignore", "pipe", "pipe"] });
   return new Promise((resolve, reject) => {
     let seen = "";
     const timer = setTimeout(() => reject(new Error(`${command} did not start:\n${seen}`)), 20000);
@@ -110,6 +110,23 @@ async function main() {
     );
     processes.push(other.child);
     const site2 = other.match[1];
+    // One started in a folder that is in no repository, as a newcomer
+    // might, with a folder chooser that always picks the same folder.
+    const elsewhere = join(work, "elsewhere");
+    mkdirSync(join(elsewhere, "start"), { recursive: true });
+    mkdirSync(join(elsewhere, "chosen"));
+    const chooser = join(work, "chooser.sh");
+    writeFileSync(chooser, `#!/bin/sh\necho '${join(elsewhere, "chosen")}'\n`);
+    chmodSync(chooser, 0o755);
+    const loose = await launch(
+      found(SERVERS, "projj binary (build it first)"),
+      ["serve", "--port", "0", "--web-dir", join(SDK, "web")],
+      { PROJJ_DATA_DIR: join(work, "data"), PROJJ_SEARCH_DIRS: `${root}:${elsewhere}`, PROJJ_FOLDER_CHOOSER: chooser },
+      LINK,
+      join(elsewhere, "start"),
+    );
+    processes.push(loose.child);
+    const site3 = loose.match[1];
 
     const chrome = await launch(
       found(CHROMES, "Chrome (set CHROME)"),
@@ -130,7 +147,7 @@ async function main() {
     // Each server prints one link, good once. The harness follows it itself
     // and gives the browser the same session, so both can use the server.
     const cookies = {};
-    for (const { match } of [server, other]) {
+    for (const { match } of [server, other, loose]) {
       const response = await fetch(match[0].slice("projj: open ".length), { redirect: "manual" });
       const [pair] = (response.headers.get("set-cookie") || fail(`no session from ${match[1]}`)).split(";");
       const [name, value] = pair.split("=");
@@ -152,7 +169,7 @@ async function main() {
         await call(site, "/api/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, value: null }) });
       }
       try {
-        await run(page, site, site2, { browser, server });
+        await run(page, site, site2, { browser, server, site3, work: elsewhere, root, call });
         console.log(`ok    ${name}`);
       } catch (err) {
         failures++;
@@ -371,7 +388,139 @@ async function importJson(page, json) {
 
 const FAR = [-1, 0, -2, 40, 3, 90, 10, -10, 60];
 
+/** Opens the menu behind the projj button and follows "Choose a projj". */
+async function chooseAnother(page) {
+  await page.click("#menu-toggle");
+  await page.waitFor(`!document.querySelector("#menu").hidden && document.querySelector("#menu-current").textContent.includes("Reviewing")`);
+  await page.click("#menu-choose");
+  await page.waitFor(`document.body.dataset.mode === "roots" && document.querySelector("#menu-choose").getAttribute("aria-current") === "page"`);
+}
+
+/** Presses the button labelled `label` in the explorer row for `path`, which shows when the row has focus. */
+async function rowAction(page, path, label) {
+  await page.run(`
+    const item = [...document.querySelectorAll("#explorer-tree .tree-item")].find((el) => el.querySelector(".tree-row")?.title === ${JSON.stringify(path)});
+    item.querySelector(".tree-row").focus();
+  `);
+  await page.click(`#explorer-tree .tree-item:focus-within .tree-act[aria-label^=${JSON.stringify(label)}]`);
+}
+
+/** Types into whatever has focus, as a keyboard would. */
+async function typeText(page, text) {
+  await page.send("Input.insertText", { text });
+}
+
+/** Presses Enter, which `page.press` (for printable keys) cannot. */
+async function pressEnter(page) {
+  for (const type of ["keyDown", "keyUp"]) {
+    await page.send("Input.dispatchKeyEvent", { type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: type === "keyDown" ? "\r" : undefined });
+  }
+}
+
+/** The options the root chooser shows: kind and path. */
+const ROOT_OPTIONS = `return [...document.querySelectorAll("#roots-list [role=option]")].map((li) => li.className.replace(/.*kind-/, "") + " " + li.querySelector(".roots-path").textContent);`;
+
 const TESTS = {
+  "a new root fills up from the editor: files and folders made, renamed, and deleted": async (page, site, site2, { site3, work, call }) => {
+    const fresh = join(work, "fill-me");
+    const made = await call(site3, "/api/roots/init", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: fresh }) });
+    if (!made.ok) fail(`init: ${await made.text()}`);
+    await page.send("Page.enable");
+    await page.send("Page.navigate", { url: `${site3}/?root=${encodeURIComponent(fresh)}` });
+    await page.waitFor(`document.querySelector("#stream .empty h2")?.textContent === "A new root"`);
+    await page.click("#stream .empty button", "Add a file");
+    await page.waitFor(`document.activeElement?.classList.contains("tree-input")`);
+    await typeText(page, "notes/hello.md");
+    await pressEnter(page);
+    await page.waitFor(`document.querySelector("#editor-path")?.textContent.includes("hello.md")`);
+    if (!existsSync(join(fresh, "notes/hello.md"))) fail("notes/hello.md was not made");
+
+    // A folder, from the button by the filter; it shows though git cannot list it.
+    await page.click("#explorer-new-folder");
+    await page.waitFor(`document.activeElement?.classList.contains("tree-input")`);
+    await typeText(page, "docs");
+    await pressEnter(page);
+    await page.waitFor(`[...document.querySelectorAll("#explorer-tree .tree-row.folder")].some((row) => row.title === "notes/docs")`);
+    if (!existsSync(join(fresh, "notes/docs"))) fail("notes/docs was not made inside notes, where the last file went");
+
+    // F2 renames; the name is selected without its extension, and the open file follows.
+    await page.run(`[...document.querySelectorAll("#explorer-tree .tree-row")].find((row) => row.title === "notes/hello.md").focus();`);
+    for (const type of ["keyDown", "keyUp"]) await page.send("Input.dispatchKeyEvent", { type, key: "F2", code: "F2", windowsVirtualKeyCode: 113 });
+    await page.waitFor(`document.activeElement?.classList.contains("tree-input")`);
+    const selected = await page.run(`const input = document.activeElement; return input.value.slice(input.selectionStart, input.selectionEnd);`);
+    if (selected !== "hello") fail(`selected "${selected}" to rename`);
+    await typeText(page, "welcome");
+    await pressEnter(page);
+    await page.waitFor(`document.querySelector("#editor-path")?.textContent.includes("welcome.md")`);
+    if (!existsSync(join(fresh, "notes/welcome.md")) || existsSync(join(fresh, "notes/hello.md"))) fail("notes/hello.md was not renamed");
+    // A folder, by its button, to a new place.
+    await rowAction(page, "notes/docs", "Rename");
+    await page.waitFor(`document.activeElement?.classList.contains("tree-input")`);
+    await page.run(`const input = document.activeElement; input.setSelectionRange(0, input.value.length);`);
+    await typeText(page, "guides/docs");
+    await pressEnter(page);
+    await page.waitFor(`[...document.querySelectorAll("#explorer-tree .tree-row.folder")].some((row) => row.title === "guides/docs")`);
+    if (!existsSync(join(fresh, "guides/docs")) || existsSync(join(fresh, "notes/docs"))) fail("notes/docs was not moved");
+
+    // Delete takes a second press.
+    await rowAction(page, "notes/welcome.md", "Delete");
+    await page.waitFor(`document.querySelector("#explorer-tree .tree-act.armed")`);
+    if (!existsSync(join(fresh, "notes/welcome.md"))) fail("deleted on the first press");
+    await page.click("#explorer-tree .tree-act.armed");
+    await page.waitFor(`![...document.querySelectorAll("#explorer-tree .tree-row")].some((row) => row.title === "notes/welcome.md")`);
+    if (existsSync(join(fresh, "notes/welcome.md"))) fail("notes/welcome.md is still there");
+    await page.waitFor(`!document.querySelector("#editor-path")?.textContent.includes("welcome.md")`);
+
+    // A folder holding a workspace is not the delete button's to remove.
+    mkdirSync(join(fresh, "track/x.git/sts-0/.jj"), { recursive: true });
+    writeFileSync(join(fresh, "track/x.git/sts-0/a.txt"), "a\n");
+    await page.click("#refresh");
+    await page.waitFor(`[...document.querySelectorAll("#explorer-tree .tree-row.folder")].some((row) => row.title.startsWith("track"))`);
+    const folder = await page.run(`return [...document.querySelectorAll("#explorer-tree .tree-row.folder")].find((row) => row.title.startsWith("track")).title;`);
+    await rowAction(page, folder, "Delete");
+    await page.click("#explorer-tree .tree-act.armed");
+    await page.waitFor(`document.querySelector("#toast.error:not([hidden])")?.textContent.includes("a repository's own folder")`);
+    if (!existsSync(join(fresh, "track/x.git/sts-0/a.txt"))) fail("the workspace was deleted");
+  },
+  "outside any repository, the page helps choose a root, or start one, and the menu leads back": async (page, site, site2, { site3, work, root }) => {
+    await page.send("Page.enable");
+    await page.send("Page.navigate", { url: `${site3}/` });
+    // Where it was started is offered as a new root.
+    await page.waitFor(`document.querySelector("#roots-offer:not([hidden])")?.textContent.includes("projj was started in")`);
+    const offered = await page.run(`return document.querySelector("#roots-offer").textContent;`);
+    if (!offered.includes("/start")) fail(`offered: ${offered}`);
+    // Words search what was found on the device.
+    await page.waitFor(`document.activeElement?.id === "roots-query"`);
+    await typeText(page, "root");
+    await page.waitFor(`document.querySelector("#roots-list [role=option]")?.textContent.includes(${JSON.stringify(root.split("/").pop())})`);
+    await pressEnter(page);
+    await page.waitFor(`document.querySelectorAll("#tree .file-row").length > 0`);
+    const header = await page.run(`return { name: document.querySelector("#root-name").textContent, search: location.search };`);
+    if (header.name !== "root" || !header.search.startsWith("?root=")) fail(`header: ${JSON.stringify(header)}`);
+
+    // Back to choosing, through the menu: what was opened is first, as recent.
+    await chooseAnother(page);
+    await page.waitFor(`document.querySelector("#roots-list .kind-projj .roots-when")`);
+    // A path is completed folder by folder, and a new one offered as a root.
+    await typeText(page, `${work}/`);
+    await page.waitFor(`document.querySelector("#roots-list")?.textContent.includes("chosen")`);
+    await typeText(page, "brand-new");
+    await page.waitFor(`document.querySelector("#roots-list .kind-new")?.textContent.includes("brand-new")`);
+    const options = await page.run(ROOT_OPTIONS);
+    if (options.length !== 1 || !options[0].startsWith("new ")) fail(`options: ${JSON.stringify(options)}`);
+    await pressEnter(page);
+    await page.waitFor(`document.querySelector("#root-name")?.textContent === "brand-new"`);
+    await page.waitFor(`document.querySelector("#stream .empty h2")?.textContent === "A new root"`);
+    if (!existsSync(join(work, "brand-new/.git")) || !existsSync(join(work, "brand-new/track"))) fail("brand-new was not made a root");
+
+    // A chosen folder that is in no repository is offered too.
+    await chooseAnother(page);
+    await page.waitFor(`!document.querySelector("#roots-choose").hidden`);
+    await page.click("#roots-choose");
+    await page.waitFor(`document.querySelector("#roots-offer:not([hidden])")?.textContent.includes("You chose")`);
+    await page.click("#roots-offer button", "Start a new root here");
+    await page.waitFor(`document.querySelector("#root-name")?.textContent === "chosen"`);
+  },
   "a browser that was not given the link is shut out": async (page, site, site2, { browser }) => {
     // A browser context of its own has none of the harness's cookies.
     const { browserContextId } = await browser.send("Target.createBrowserContext");
@@ -456,12 +605,12 @@ const TESTS = {
     await page.click("#tree .file-row", paths[40][1]);
     await settledPlace(page, paths[40][0]);
     await page.click("#tree .group-row", "widgets");
-    const head = await settledPlace(page, "group:track/example.com/acme/widgets.git/sdk-0");
+    const head = await settledPlace(page, "group:track/example.com/acme/widgets.git/sts-0");
     if (!(head.gap >= 0 && head.gap <= 12) && !head.atEnd) fail(`heading at ${JSON.stringify(head)}`);
     // Folded, the list may end before the heading can reach the top; once
     // unfolded, it goes there, with the workspace's first file below it.
     await page.click("#stream .group-toggle", "widgets");
-    const first = await settledPlace(page, "group:track/example.com/acme/widgets.git/sdk-0");
+    const first = await settledPlace(page, "group:track/example.com/acme/widgets.git/sts-0");
     if (!(first.gap >= 0 && first.gap <= 12)) fail(`heading at ${JSON.stringify(first)} after unfolding`);
   },
 

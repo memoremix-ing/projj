@@ -32,7 +32,8 @@ enum Command {
     /// Serve the local code review web app.
     Serve {
         /// Any path inside the root to review. Defaults to the current
-        /// directory; git is asked which repository contains it.
+        /// directory; git is asked which repository contains it. Outside
+        /// any repository, the page helps choose a root, or start one.
         #[arg(long)]
         root: Option<PathBuf>,
         /// Port to listen on; 0 picks a free one.
@@ -132,7 +133,7 @@ async fn run(command: Command) -> Result<()> {
             port,
             web_dir,
             data,
-        } => serve(resolve_root(root)?, port, web_dir, data.store()?).await,
+        } => serve(root, port, web_dir, data.store()?).await,
         Command::Drafts { discard, data } => drafts(data.store()?, discard).await,
         Command::Jj { .. } => unreachable!("handled before the runtime starts"),
     }
@@ -186,25 +187,49 @@ async fn drafts(store: store::Store, discard: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// The root to open first, and where projj was started if that is in no
+/// repository. A `--root` that leads to no repository is a mistake to stop
+/// at; the current directory leading nowhere just means choosing one.
+fn starting_point(root: Option<PathBuf>) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+    if let Some(asked) = root {
+        return match root::resolve(&asked)? {
+            Some(resolved) => Ok((Some(resolved.root), None)),
+            None => anyhow::bail!("{} is in no git repository", asked.display()),
+        };
+    }
+    let here = std::env::current_dir().context("cannot read the current directory")?;
+    Ok(match root::resolve(&here)? {
+        Some(resolved) => (Some(resolved.root), None),
+        None => (None, Some(here)),
+    })
+}
+
 async fn serve(
-    root: PathBuf,
+    root: Option<PathBuf>,
     port: u16,
     web_dir: Option<PathBuf>,
     store: store::Store,
 ) -> Result<()> {
+    let (root, start_dir) = starting_point(root)?;
     // Loopback only: this server stages changes on behalf of whoever asks.
     let requested = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
     let listener = tokio::net::TcpListener::bind(requested)
         .await
         .with_context(|| format!("cannot listen on {requested}"))?;
     let addr = listener.local_addr()?;
-    let app = Arc::new(api::App::new(root, jj::Jj::load()?, web_dir, store));
+    let app = api::App::new(jj::Jj::load()?, web_dir, store)
+        .with_default_root(root)
+        .with_start_dir(start_dir)
+        .with_chooser(projj::chooser::system());
+    let app = Arc::new(app);
     let gate = Arc::new(gate::Gate::new(addr));
-    println!(
-        "projj: reviewing {}, with {}",
-        app.root.display(),
-        app.git.engine().describe()
-    );
+    let git = projj::Engine::detect().describe();
+    match &app.default_root {
+        Some(root) => println!("projj: reviewing {}, with {git}", root.display()),
+        None => {
+            println!("projj: not in a git repository; the page will help choose a root, with {git}")
+        }
+    }
     println!(
         "projj: unsaved edits and settings are kept in {}",
         app.store.file().display()

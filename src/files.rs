@@ -92,6 +92,143 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf> {
     Ok(file)
 }
 
+/// What `create` makes, and `delete` removed.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    File,
+    Folder,
+}
+
+/// Directories a folder must not hold to be deleted from the editor: those of
+/// git and jj repositories and workspaces, and the conventional `.repo` store.
+const KEPT: &[&str] = &[".git", ".jj", ".repo"];
+
+/// `root.join(path)`, once it is sure that what is there or would be made
+/// there is inside the root: the nearest folder that exists on the way must
+/// not be reached through a link leading out.
+fn inside(root: &Path, path: &str) -> Result<PathBuf> {
+    check_path(path)?;
+    let target = root.join(path);
+    let mut dir = target.parent();
+    while let Some(at) = dir {
+        if std::fs::symlink_metadata(at).is_ok() {
+            if !at.canonicalize()?.starts_with(root) {
+                return Err(FileError::Unsupported(format!("{path}: outside the root")));
+            }
+            return Ok(target);
+        }
+        dir = at.parent();
+    }
+    Err(FileError::Unsupported(format!("{path}: outside the root")))
+}
+
+/// Makes an empty file, or a folder, along with any folders it goes in.
+/// Never replaces anything.
+pub fn create(root: &Path, path: &str, kind: Kind) -> Result<()> {
+    let target = inside(root, path)?;
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err(FileError::Changed(format!("{path} exists already")));
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match kind {
+        Kind::File => drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?,
+        ),
+        Kind::Folder => std::fs::create_dir(&target)?,
+    }
+    Ok(())
+}
+
+/// Deletes a file, or a folder with everything in it, and says which it was.
+/// A link is deleted itself, never what it leads to. A folder holding a
+/// repository or a jj workspace is refused: that is not for an editor's
+/// delete button.
+pub fn delete(root: &Path, path: &str) -> Result<Kind> {
+    let target = inside(root, path)?;
+    let meta = std::fs::symlink_metadata(&target)?;
+    if !meta.is_dir() {
+        std::fs::remove_file(&target)?;
+        return Ok(Kind::File);
+    }
+    if let Some(found) = holding(&target)? {
+        let found = found
+            .strip_prefix(root)
+            .unwrap_or(&found)
+            .display()
+            .to_string();
+        return Err(FileError::Unsupported(format!(
+            "{path} holds {found}, a repository's own folder; delete it some other way if you mean to"
+        )));
+    }
+    // Does not follow links inside, either.
+    std::fs::remove_dir_all(&target)?;
+    Ok(Kind::Folder)
+}
+
+/// Renames or moves a file or a folder, making any folders on the way, and
+/// says which it was. Never replaces anything. A folder holding a
+/// repository or a jj workspace stays put: jj finds a workspace's repository
+/// by a relative path, which moving would break.
+pub fn rename(root: &Path, from: &str, to: &str) -> Result<Kind> {
+    let source = inside(root, from)?;
+    let target = inside(root, to)?;
+    let meta = std::fs::symlink_metadata(&source)?;
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err(FileError::Changed(format!("{to} exists already")));
+    }
+    let kind = if meta.is_dir() {
+        Kind::Folder
+    } else {
+        Kind::File
+    };
+    if kind == Kind::Folder {
+        if to.starts_with(&format!("{from}/")) {
+            return Err(FileError::Unsupported(format!(
+                "{from} cannot go inside itself"
+            )));
+        }
+        if let Some(found) = holding(&source)? {
+            let found = found
+                .strip_prefix(root)
+                .unwrap_or(&found)
+                .display()
+                .to_string();
+            return Err(FileError::Unsupported(format!(
+                "{from} holds {found}, a repository's own folder; move it some other way if you mean to"
+            )));
+        }
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::rename(&source, &target)?;
+    Ok(kind)
+}
+
+/// The first of the `KEPT` directories anywhere inside `dir`.
+fn holding(dir: &Path) -> std::io::Result<Option<PathBuf>> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if KEPT.iter().any(|kept| entry.file_name() == *kept) {
+            return Ok(Some(path));
+        }
+        if let Some(found) = holding(&path)? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
 pub fn read(root: &Path, path: &str) -> Result<TextFile> {
     let unsupported = |why: &str| FileError::Unsupported(format!("{path}: {why}"));
     let bytes = std::fs::read(resolve(root, path)?)?;
@@ -381,5 +518,103 @@ mod tests {
             "secret"
         );
         assert!(!root.join("missing").exists());
+    }
+
+    #[test]
+    fn creates_and_deletes_files_and_folders() {
+        let (_dir, root) = root();
+        create(&root, "src/deep/new.rs", Kind::File).unwrap();
+        assert_eq!(std::fs::read(root.join("src/deep/new.rs")).unwrap(), b"");
+        create(&root, "docs", Kind::Folder).unwrap();
+        assert!(root.join("docs").is_dir());
+        // Nothing is replaced.
+        std::fs::write(root.join("src/deep/new.rs"), "kept").unwrap();
+        assert!(matches!(
+            create(&root, "src/deep/new.rs", Kind::File),
+            Err(FileError::Changed(_))
+        ));
+        assert!(matches!(
+            create(&root, "docs", Kind::File),
+            Err(FileError::Changed(_))
+        ));
+        assert_eq!(
+            std::fs::read(root.join("src/deep/new.rs")).unwrap(),
+            b"kept"
+        );
+        for bad in ["../out", ".git/config", "a/.jj/x", "/abs", ""] {
+            assert!(create(&root, bad, Kind::File).is_err(), "{bad}");
+        }
+
+        assert_eq!(delete(&root, "src/deep/new.rs").unwrap(), Kind::File);
+        assert!(!root.join("src/deep/new.rs").exists());
+        assert_eq!(delete(&root, "src").unwrap(), Kind::Folder);
+        assert!(!root.join("src").exists());
+        assert!(matches!(delete(&root, "src"), Err(FileError::Io(_))));
+
+        // Never a folder holding a repository or a workspace.
+        for kept in [
+            "vendor/lib/.git",
+            "track/x.git/sts-0/.jj",
+            "track/y.git/.repo",
+        ] {
+            std::fs::create_dir_all(root.join(kept)).unwrap();
+        }
+        for folder in ["vendor", "track", "track/y.git"] {
+            let err = delete(&root, folder).unwrap_err();
+            assert!(
+                err.to_string().contains("a repository's own folder"),
+                "{err}"
+            );
+        }
+        assert!(root.join("vendor/lib/.git").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stays_inside_the_root() {
+        let (dir, root) = root();
+        let root = root.join("root");
+        let outside = dir.path().canonicalize().unwrap().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(outside.join("inner")).unwrap();
+        std::fs::write(outside.join("precious"), "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("away")).unwrap();
+        assert!(create(&root, "away/new.txt", Kind::File).is_err());
+        assert!(delete(&root, "away/precious").is_err());
+        assert!(delete(&root, "away/inner").is_err());
+        // The link itself may go; what it leads to stays.
+        assert_eq!(delete(&root, "away").unwrap(), Kind::File);
+        assert_eq!(std::fs::read(outside.join("precious")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn renames_and_moves() {
+        let (_dir, root) = root();
+        create(&root, "a.txt", Kind::File).unwrap();
+        create(&root, "src/one.rs", Kind::File).unwrap();
+        assert_eq!(rename(&root, "a.txt", "notes/b.txt").unwrap(), Kind::File);
+        assert!(root.join("notes/b.txt").is_file() && !root.join("a.txt").exists());
+        assert_eq!(rename(&root, "src", "lib/src").unwrap(), Kind::Folder);
+        assert!(root.join("lib/src/one.rs").is_file());
+        // Nothing replaced, nothing lost.
+        assert!(matches!(
+            rename(&root, "notes/b.txt", "lib/src/one.rs"),
+            Err(FileError::Changed(_))
+        ));
+        assert!(matches!(
+            rename(&root, "gone", "here"),
+            Err(FileError::Io(_))
+        ));
+        assert!(rename(&root, "lib", "lib/inner").is_err());
+        assert!(rename(&root, "notes/b.txt", "../out.txt").is_err());
+        assert!(rename(&root, "notes/b.txt", ".git/b.txt").is_err());
+        assert!(root.join("notes/b.txt").is_file());
+        std::fs::create_dir_all(root.join("track/x.git/sts-0/.jj")).unwrap();
+        let err = rename(&root, "track", "elsewhere").unwrap_err();
+        assert!(
+            err.to_string().contains("a repository's own folder"),
+            "{err}"
+        );
+        assert!(root.join("track/x.git/sts-0/.jj").is_dir());
     }
 }

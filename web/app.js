@@ -43,12 +43,16 @@ function desktopBridge() {
   for (const message of window.__electrobunPendingHostMessages?.splice(0) || []) receive(message);
   return {
     /** Resolves with `{ status, body }`. Handing over is immediate, so a closing page loses nothing. */
-    send(method, path, body) {
+    send(method, path, root, body) {
       return new Promise((resolve) => {
         const id = ++next;
         waiting.set(id, resolve);
-        window.__electrobunHostBridge.postMessage(JSON.stringify({ type: "projj", id, method, path, body: body ?? "" }));
+        window.__electrobunHostBridge.postMessage(JSON.stringify({ type: "projj", id, method, path, root, body: body ?? "" }));
       });
+    },
+    /** Tells the app which root the window shows (`null` while choosing), for its title and for reopening. */
+    showing(root, title) {
+      window.__electrobunHostBridge.postMessage(JSON.stringify({ type: "projj-window", root, title }));
     },
   };
 }
@@ -60,13 +64,19 @@ async function request(method, path, params, body) {
     if (value != null && value !== "") url.searchParams.set(key, value);
   }
   const payload = body ? JSON.stringify(body) : undefined;
+  // Every request says which root it is about: pages on different roots can
+  // be open at once, so the server keeps no "current" one.
+  const root = state.rootPath ? encodeURIComponent(state.rootPath) : null;
   let status, text;
   if (desktop) {
-    ({ status, body: text } = await desktop.send(method, url.pathname + url.search, payload));
+    ({ status, body: text } = await desktop.send(method, url.pathname + url.search, root, payload));
   } else {
+    const headers = {};
+    if (body) headers["content-type"] = "application/json";
+    if (root) headers["x-projj-root"] = root;
     const response = await fetch(url, {
       method,
-      headers: body ? { "content-type": "application/json" } : undefined,
+      headers,
       body: payload,
       // Lets a small write finish even if the page is closed under it.
       keepalive: method !== "GET" && (payload?.length || 0) < KEEPALIVE_LIMIT,
@@ -140,6 +150,8 @@ function tally(added, removed) {
 }
 
 const state = {
+  // The path of the root under review, from the page's address; null while choosing one.
+  rootPath: null,
   root: null,
   view: "review",
   context: 3,
@@ -646,10 +658,23 @@ async function syncStream() {
   if (!entries.length) {
     for (const section of state.sections.values()) lazy.unobserve(section.el);
     state.sections.clear();
-    const message = staged
-      ? ["Nothing reviewed yet", "Changes you mark as reviewed are staged in git and collect here until you commit them."]
-      : ["Nothing left to review", "Every change is staged in git. Commit from a terminal to record the review."];
-    stream.replaceChildren(h("div", { class: "empty" }, h("h2", null, message[0]), h("p", null, message[1])));
+    // A root just started has nothing anywhere yet: say how one fills up.
+    const fresh = !state.status?.head && !state.status?.entries.length && !state.root?.repos.length;
+    const message = fresh
+      ? ["A new root", "Nothing is in it yet. jj repositories go under track/, one folder per upstream, such as track/github.com/tenant/repo.git/, with the repository in .repo/ and workspaces like sts-0/ beside it. Whatever changes in here shows up to review."]
+      : staged
+        ? ["Nothing reviewed yet", "Changes you mark as reviewed are staged in git and collect here until you commit them."]
+        : ["Nothing left to review", "Every change is staged in git. Commit from a terminal to record the review."];
+    stream.replaceChildren(
+      h(
+        "div",
+        { class: "empty" },
+        h("h2", null, message[0]),
+        h("p", null, message[1]),
+        fresh &&
+          h("p", null, h("button", { type: "button", class: "mark", onclick: () => (showEditor(), startCreate("file", "")) }, "Add a file")),
+      ),
+    );
     return;
   }
   const children = [];
@@ -722,7 +747,7 @@ async function loadStatus() {
   if (status.entries.some((entry) => entry.workspace && !known.has(entry.workspace))) await loadRoot();
   state.status = status;
   state.statusText = text;
-  $("#root-head").textContent = `${status.branch || "detached"} @ ${(status.head || "no commits").slice(0, 8)}`;
+  $("#root-head").textContent = `${status.branch || "detached"} @ ${status.head ? status.head.slice(0, 8) : "no commits"}`;
   renderSidebar();
   // The explorer shows which files changed, and open files may have too.
   if (editorOpen()) refreshFiles().catch(() => {});
@@ -983,10 +1008,22 @@ const editor = {
   message: "",
   // The explorer: every file git does not ignore, and what is unfolded.
   files: [],
-  filesText: "",
+  // Null until listed, so that a root with no files at all is listed too.
+  filesText: null,
   tree: null,
   expanded: new Set(),
   filter: "",
+  // The folder new files and folders go in: the one last clicked, or the
+  // folder of the file last opened.
+  here: "",
+  // A name being typed for something new: `{ kind, dir, value }`.
+  creating: null,
+  // A file or folder being renamed: `{ path, kind, value }`.
+  renaming: null,
+  // Folders made here that git cannot list yet, having nothing in them.
+  madeFolders: new Set(),
+  // What waits for a second press of its delete button.
+  deleting: null,
   // The dirty file whose close button is waiting for a second press.
   armed: null,
   checking: false,
@@ -1881,16 +1918,12 @@ async function openDrafts() {
 
 async function refreshFiles() {
   const { files } = await api("/api/files");
-  const text = files.join("\n");
+  const text = [...files, "", ...editor.madeFolders].join("\n");
   if (text === editor.filesText) return;
   editor.files = files;
   editor.filesText = text;
   const root = { path: "", dirs: new Map(), files: [] };
-  for (const listed of files) {
-    // Git names a nested repository as a directory and does not look inside.
-    const nested = listed.endsWith("/");
-    const parts = (nested ? listed.slice(0, -1) : listed).split("/");
-    const name = parts.pop();
+  const folder = (parts) => {
     let node = root;
     parts.forEach((part, depth) => {
       if (!node.dirs.has(part)) {
@@ -1898,8 +1931,17 @@ async function refreshFiles() {
       }
       node = node.dirs.get(part);
     });
-    node.files.push({ name, path: listed, nested });
+    return node;
+  };
+  for (const listed of files) {
+    // Git names a nested repository as a directory and does not look inside.
+    const nested = listed.endsWith("/");
+    const parts = (nested ? listed.slice(0, -1) : listed).split("/");
+    const name = parts.pop();
+    folder(parts).files.push({ name, path: listed, nested });
   }
+  // Empty folders made here are shown too, though git has nothing in them to list.
+  for (const made of editor.madeFolders) folder(made.split("/"));
   editor.tree = root;
   if (!editor.expanded.size) {
     // Start with the workspaces showing rather than a single folded line.
@@ -1934,7 +1976,7 @@ function renderExplorer() {
 
   const fileRow = (file, depth, withDir) => {
     const [dir, name] = splitPath(file.path);
-    return h(
+    const row = h(
       "button",
       {
         type: "button",
@@ -1943,11 +1985,19 @@ function renderExplorer() {
         style: `padding-left: ${26 + depth * 14}px`,
         title: file.nested ? "A repository of its own; git does not list what is inside" : file.path,
         disabled: file.nested,
-        onclick: () => openEditor(file.path).catch(fail),
+        onclick: () => {
+          editor.here = dir.replace(/\/$/, "");
+          openEditor(file.path).catch(fail);
+        },
       },
       h("span", { class: "name" }, file.nested ? `${file.name}/` : withDir ? [name, h("span", { class: "dir" }, ` ${dir}`)] : file.name),
       unsaved.has(file.path) && h("span", { class: "unsaved", title: "Unsaved edits" }),
       changes.has(file.path) && h("span", { class: "change", title: "Has changes to review" }, changes.get(file.path)),
+    );
+    if (editor.renaming?.path === file.path) return renameRow(26 + Math.max(depth, 0) * 14);
+    return treeItem(
+      row,
+      file.nested ? [] : [renameButton(file.path, name, "file"), deleteButton(file.path, name, changes.get(file.path) === "?")],
     );
   };
 
@@ -1957,34 +2007,45 @@ function renderExplorer() {
       // A chain of directories holding nothing else reads as one row.
       let dir = first;
       let label = first.name;
-      while (!dir.files.length && dir.dirs.size === 1) {
+      // Not past a folder something new is being named in.
+      while (!dir.files.length && dir.dirs.size === 1 && dir.path !== editor.creating?.dir) {
         dir = dir.dirs.values().next().value;
         label += `/${dir.name}`;
       }
       const open = editor.expanded.has(dir.path);
-      rows.push(
-        h(
-          "button",
-          {
-            type: "button",
-            class: "tree-row folder",
-            style: `padding-left: ${10 + depth * 14}px`,
-            "aria-expanded": String(open),
-            title: dir.path,
-            onclick: () => {
-              if (open) editor.expanded.delete(dir.path);
-              else editor.expanded.add(dir.path);
-              renderExplorer();
-            },
+      const row = h(
+        "button",
+        {
+          type: "button",
+          class: `tree-row folder ${dir.path === editor.here ? "here" : ""}`,
+          style: `padding-left: ${10 + depth * 14}px`,
+          "aria-expanded": String(open),
+          title: dir.path,
+          onclick: () => {
+            if (open) editor.expanded.delete(dir.path);
+            else editor.expanded.add(dir.path);
+            editor.here = dir.path;
+            renderExplorer();
           },
-          h("span", { class: "caret" }, open ? "▾" : "▸"),
-          h("span", { class: "name" }, h("bdi", null, label)),
-          marks.unsavedDirs.has(dir.path) && !open && h("span", { class: "unsaved", title: "Unsaved edits inside" }),
-          marks.changedDirs.has(dir.path) && !open && h("span", { class: "change", title: "Changes to review inside" }, "•"),
-        ),
+        },
+        h("span", { class: "caret" }, open ? "▾" : "▸"),
+        h("span", { class: "name" }, h("bdi", null, label)),
+        marks.unsavedDirs.has(dir.path) && !open && h("span", { class: "unsaved", title: "Unsaved edits inside" }),
+        marks.changedDirs.has(dir.path) && !open && h("span", { class: "change", title: "Changes to review inside" }, "•"),
+      );
+      rows.push(
+        editor.renaming?.path === dir.path
+          ? renameRow(10 + depth * 14)
+          : treeItem(row, [
+              actionButton("file", `New file in ${dir.path}`, () => startCreate("file", dir.path)),
+              actionButton("folder", `New folder in ${dir.path}`, () => startCreate("folder", dir.path)),
+              renameButton(dir.path, label, "folder"),
+              deleteButton(dir.path, label, false, true),
+            ]),
       );
       if (open) walk(dir, depth + 1);
     }
+    if (editor.creating?.dir === node.path) rows.push(nameRow(depth));
     for (const file of [...node.files].sort((a, b) => a.name.localeCompare(b.name))) rows.push(fileRow(file, depth, false));
   };
 
@@ -2034,8 +2095,243 @@ function renderExplorer() {
   list.replaceChildren(h("h3", null, "Open"), ...open);
   const tree = $("#explorer-tree");
   const { scrollTop } = tree;
+  const typing = document.activeElement?.classList.contains("tree-input") && document.activeElement;
+  const [selStart, selEnd] = typing ? [typing.selectionStart, typing.selectionEnd] : [];
   tree.replaceChildren(...rows);
   tree.scrollTop = scrollTop;
+  // Rows are redrawn as files change; whoever was typing a name carries on.
+  const input = $("#explorer-tree .tree-input");
+  if (!input) return;
+  if (editor.renaming?.focus) {
+    // The name is what is usually changed: select it, without its extension.
+    const { value } = input;
+    const start = value.lastIndexOf("/") + 1;
+    const dot = value.lastIndexOf(".");
+    const end = editor.renaming.kind === "file" && dot > start ? dot : value.length;
+    input.focus();
+    input.setSelectionRange(start, end);
+    editor.renaming.focus = false;
+  } else if (editor.creating?.focus) {
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    editor.creating.focus = false;
+  } else if (typing) {
+    input.focus();
+    input.setSelectionRange(selStart, selEnd);
+  }
+}
+
+/** The outlines of the explorer's small buttons, on a 16-unit grid. */
+const ICONS = {
+  file: ["M4 1.5h5l3.5 3.5v9.5h-8.5z M9 1.5v3.5h3.5", "M8 8v5 M5.5 10.5h5"],
+  folder: ["M1.5 3.5h4.5l1.5 1.5h7v8.5h-13z", "M8 7v5 M5.5 9.5h5"],
+  trash: ["M2.5 4h11 M6 4v-2h4v2 M4 4l0.8 10h6.4l0.8-10", "M6.5 6.5v5 M9.5 6.5v5"],
+  rename: ["M10.5 2.5l3 3-8 8h-3v-3z", "M9 4l3 3"],
+};
+
+function icon(name) {
+  const el = svg("svg", { viewBox: "0 0 16 16", "aria-hidden": "true" });
+  for (const d of ICONS[name]) el.append(svg("path", { d }));
+  return el;
+}
+
+/** A row of the tree with buttons that show when it is pointed at or focused. */
+function treeItem(row, actions) {
+  return h("div", { class: "tree-item" }, row, actions.length && h("span", { class: "tree-actions" }, actions));
+}
+
+function actionButton(name, label, onclick) {
+  return h("button", { type: "button", class: "icon tree-act", title: label, "aria-label": label, onclick }, icon(name));
+}
+
+function renameButton(path, name, kind) {
+  return actionButton("rename", `Rename or move ${name} (F2)`, () => startRename(path, kind));
+}
+
+/** Deletes on the second press, so that one slip of the mouse loses nothing. */
+function deleteButton(path, name, untracked, folder = false) {
+  const armed = editor.deleting === path;
+  const warning = folder ? "everything in it goes too; whatever git has not seen cannot be brought back" : untracked ? "git has not seen it, so it cannot be brought back" : "git can bring it back";
+  return h(
+    "button",
+    {
+      type: "button",
+      class: `icon tree-act ${armed ? "armed" : ""}`,
+      title: armed ? `Press again to delete ${path}: ${warning}` : `Delete ${path}`,
+      "aria-label": armed ? `Press again to delete ${name}` : `Delete ${name}`,
+      onclick: () => deleteEntry(path),
+    },
+    armed ? "Delete?" : icon("trash"),
+  );
+}
+
+/** The input for naming something new, in the folder it will go in. */
+function nameRow(depth) {
+  const creating = editor.creating;
+  const label = creating.kind === "file" ? "New file name" : "New folder name";
+  const input = h("input", {
+    type: "text",
+    class: "tree-input",
+    spellcheck: "false",
+    autocomplete: "off",
+    "aria-label": creating.dir ? `${label}, in ${creating.dir}` : label,
+    placeholder: creating.kind === "file" ? "name.ext, or folder/name.ext" : "folder, or folder/inner",
+    oninput: (event) => (creating.value = event.target.value),
+    onkeydown: (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        createEntry().catch(fail);
+      } else if (event.key === "Escape") {
+        event.stopPropagation();
+        cancelCreate();
+      }
+    },
+    // Leaving an empty name means changing one's mind; a typed one is kept.
+    onblur: () => setTimeout(() => editor.creating === creating && !creating.value.trim() && cancelCreate(), 150),
+  });
+  input.value = creating.value;
+  const indent = (creating.kind === "file" ? 26 : 10) + depth * 14;
+  return h("div", { class: `tree-item naming kind-${creating.kind}`, style: `padding-left: ${indent - 18}px` }, icon(creating.kind), input);
+}
+
+/** The input for a new name, or a new place, in the row of what is renamed. */
+function renameRow(indent) {
+  const renaming = editor.renaming;
+  const input = h("input", {
+    type: "text",
+    class: "tree-input",
+    spellcheck: "false",
+    autocomplete: "off",
+    "aria-label": `New name or place for ${renaming.path}`,
+    oninput: (event) => (renaming.value = event.target.value),
+    onkeydown: (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        renameEntry().catch(fail);
+      } else if (event.key === "Escape") {
+        event.stopPropagation();
+        cancelRename();
+      }
+    },
+    // Leaving the name as it was means changing one's mind; a changed one is kept.
+    onblur: () => setTimeout(() => editor.renaming === renaming && renaming.value.trim() === renaming.path && cancelRename(), 150),
+  });
+  input.value = renaming.value;
+  return h("div", { class: "tree-item naming", style: `padding-left: ${indent - 18}px` }, icon("rename"), input);
+}
+
+const within = (path, folder) => path === folder || path.startsWith(`${folder}/`);
+
+/** Starts renaming, unless open files with unsaved edits would have to move. */
+function startRename(path, kind) {
+  const unsaved = dirtyBuffers().filter((buffer) => within(buffer.path, path));
+  if (unsaved.length) {
+    return toast(`Save or discard the unsaved edits to ${unsaved.map((buffer) => buffer.path).join(", ")} first.`, true);
+  }
+  editor.creating = null;
+  editor.renaming = { path, kind, value: path, focus: true };
+  renderExplorer();
+}
+
+function cancelRename() {
+  editor.renaming = null;
+  renderExplorer();
+}
+
+/** Renames or moves; open files, unfolded folders and the folder new things go in follow. */
+async function renameEntry() {
+  const { path: from, value } = editor.renaming;
+  const to = value.trim().replace(/^\/+|\/+$/g, "");
+  if (!to || to === from) return cancelRename();
+  const { kind } = await post("/api/file/rename", { from, to });
+  editor.renaming = null;
+  const moved = (path) => (within(path, from) ? to + path.slice(from.length) : path);
+  const reopen = [];
+  for (const open of [...editor.buffers.keys()]) {
+    if (!within(open, from)) continue;
+    // The file in front comes back in front.
+    if (open === editor.active) reopen.push(moved(open));
+    else reopen.unshift(moved(open));
+    closeBuffer(open, true);
+  }
+  editor.madeFolders = new Set([...editor.madeFolders].map(moved));
+  editor.expanded = new Set([...editor.expanded].map(moved));
+  if (editor.here) editor.here = moved(editor.here);
+  reveal(kind === "folder" ? `${to}/x` : to);
+  editor.filesText = null;
+  await refreshFiles();
+  for (const path of reopen) await openEditor(path);
+  toast(`Renamed ${from} to ${to}.`);
+  loadStatus().catch(() => {});
+}
+
+function startCreate(kind, dir = editor.here) {
+  if (editor.filter) {
+    editor.filter = "";
+    $("#explorer-filter").value = "";
+  }
+  if (dir) {
+    reveal(`${dir}/x`);
+    editor.expanded.add(dir);
+  }
+  editor.renaming = null;
+  editor.creating = { kind, dir, value: "", focus: true };
+  renderExplorer();
+}
+
+function cancelCreate() {
+  editor.creating = null;
+  renderExplorer();
+}
+
+/** Makes what was named: a file opens in the editor, a folder becomes where the next things go. */
+async function createEntry() {
+  const { kind, dir, value } = editor.creating;
+  const name = value.trim().replace(/^\/+|\/+$/g, "");
+  if (!name) return cancelCreate();
+  const path = dir ? `${dir}/${name}` : name;
+  await post("/api/file/create", { path, kind });
+  editor.creating = null;
+  if (kind === "folder") {
+    editor.madeFolders.add(path);
+    reveal(`${path}/x`);
+    editor.here = path;
+  } else {
+    reveal(path);
+    editor.here = splitPath(path)[0].replace(/\/$/, "");
+  }
+  editor.filesText = null;
+  await refreshFiles();
+  if (kind === "file") await openEditor(path);
+  loadStatus().catch(() => {});
+}
+
+async function deleteEntry(path) {
+  if (editor.deleting !== path) {
+    editor.deleting = path;
+    renderExplorer();
+    setTimeout(() => {
+      if (editor.deleting !== path) return;
+      editor.deleting = null;
+      renderExplorer();
+    }, 5000);
+    return;
+  }
+  editor.deleting = null;
+  try {
+    await request("DELETE", "/api/file", { path });
+  } catch (err) {
+    renderExplorer();
+    return fail(err);
+  }
+  const under = (each) => each === path || each.startsWith(`${path}/`);
+  for (const open of [...editor.buffers.keys()]) if (under(open)) closeBuffer(open, true);
+  for (const made of [...editor.madeFolders]) if (under(made)) editor.madeFolders.delete(made);
+  if (under(editor.here)) editor.here = splitPath(path)[0].replace(/\/$/, "");
+  toast(`Deleted ${path}.`);
+  editor.filesText = null;
+  await refreshFiles();
+  loadStatus().catch(() => {});
 }
 
 function bindEditor() {
@@ -2096,6 +2392,15 @@ function bindEditor() {
   showFiles(setting("explorer", true));
   widthHandle(explorer, "explorer-width", "Resize the file list");
   $("#explorer-toggle").addEventListener("click", () => showFiles(explorer.hidden));
+  $("#explorer-new-file").addEventListener("click", () => startCreate("file"));
+  // F2 renames the focused row, as in most file managers.
+  $("#explorer-tree").addEventListener("keydown", (event) => {
+    const row = event.target.closest?.(".tree-row");
+    if (event.key !== "F2" || !row || row.disabled) return;
+    event.preventDefault();
+    startRename(row.title, row.classList.contains("folder") ? "folder" : "file");
+  });
+  $("#explorer-new-folder").addEventListener("click", () => startCreate("folder"));
   const filter = $("#explorer-filter");
   filter.addEventListener("input", () => {
     editor.filter = filter.value;
@@ -2271,7 +2576,10 @@ function renderWorkspacePicker() {
 async function loadRoot() {
   state.root = await api("/api/root");
   $("#root-name").textContent = state.root.name;
+  $("#root-name").title = state.root.label;
   document.title = `${state.root.name} \u2013 projj`;
+  desktop?.showing(state.root.path, document.title);
+  renderMenu();
   if (!allWorkspaces().some((ws) => ws.path === state.ws)) state.ws = allWorkspaces()[0]?.path || null;
   renderWorkspacePicker();
 }
@@ -2571,6 +2879,345 @@ function showFileHistory(workspace, path) {
   state.base = null;
   renderWorkspacePicker();
   setView("history");
+}
+
+// ---------------------------------------------------------------- menu
+//
+// The projj button at the top left opens a panel for what is not about the
+// root on show: for now, choosing another.
+
+function showMenu(open) {
+  $("#menu").hidden = !open;
+  $("#menu-toggle").setAttribute("aria-expanded", open);
+  if (open) $("#menu-choose").focus();
+}
+
+function bindMenu() {
+  const toggle = $("#menu-toggle");
+  const menu = $("#menu");
+  toggle.addEventListener("click", () => showMenu(menu.hidden));
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      if (event.key !== "Escape" || menu.hidden) return;
+      event.stopPropagation();
+      showMenu(false);
+      toggle.focus();
+    },
+    true,
+  );
+  document.addEventListener("pointerdown", (event) => {
+    if (!menu.hidden && !menu.contains(event.target) && !toggle.contains(event.target)) showMenu(false);
+  });
+}
+
+function renderMenu() {
+  const root = state.view !== "roots" && state.root;
+  $("#menu-current").replaceChildren(
+    h("span", { class: "menu-label" }, root ? "Reviewing" : "Nothing open"),
+    root && h("strong", null, root.name),
+    // Cut at its start when long; the end says which root it is.
+    root && h("span", { class: "menu-path", title: root.path }, h("bdi", null, root.label)),
+  );
+  const choose = $("#menu-choose");
+  if (root) choose.removeAttribute("aria-current");
+  else choose.setAttribute("aria-current", "page");
+}
+
+// ---------------------------------------------------------------- roots
+//
+// Choosing a root: where a server with nothing to review opens, and where
+// "Choose a projj", in the menu behind the projj button, leads. One box does it all. Words search the
+// repositories found on this device, recent ones first; a path (starting
+// with / or ~) completes folder by folder, and a folder that is in no
+// repository yet offers to become a new root, as does one picked with the
+// folder chooser.
+
+const rootUrl = (path) => `?root=${encodeURIComponent(path)}`;
+const openRoot = (path) => location.assign(rootUrl(path));
+const isTyped = (query) => /^[/~]/.test(query.trim());
+
+const roots = { query: null, hits: [], typed: null, scanning: false, lookedAt: 0, active: -1, seq: 0, timer: null, busy: false };
+
+const KIND_LABEL = { projj: "projj root", git: "git", folder: "folder" };
+
+/** The options the list shows for the latest answer, in order. */
+function rootOptions() {
+  const options = [];
+  const typed = roots.typed;
+  let fresh = null;
+  if (typed?.kind === "root") {
+    options.push({
+      action: "open",
+      path: typed.root,
+      label: typed.root_label,
+      kind: typed.projj ? "projj" : "git",
+      title: typed.inside ? "Open the root this folder is in" : "Open",
+    });
+  } else if (typed?.kind === "folder" || (typed?.kind === "missing" && typed.creatable)) {
+    fresh = {
+      action: "init",
+      path: typed.path,
+      label: typed.label,
+      kind: "new",
+      title: typed.kind === "folder" ? "Start a new root here" : "Make the folder, start a root",
+    };
+  }
+  const typing = isTyped(roots.query || "");
+  for (const hit of roots.hits) {
+    if (typed?.kind === "root" && hit.path === typed.root) continue;
+    options.push({
+      action: hit.kind === "folder" ? "into" : "open",
+      path: hit.path,
+      label: hit.label,
+      kind: hit.kind,
+      opened: hit.opened,
+      group: typing ? "Folders" : hit.opened != null ? "Recent" : "On this device",
+    });
+  }
+  // Last, so that going through folders on the way somewhere is not a
+  // string of offers; first when there is nowhere further to go.
+  if (fresh) options[options.length ? "push" : "unshift"]({ ...fresh, group: options.length ? "New root" : null });
+  return options;
+}
+
+function optionRow(option, index) {
+  const [dir, name] = splitPath(option.label);
+  const row = h(
+    "li",
+    {
+      role: "option",
+      id: `roots-option-${index}`,
+      class: `roots-option kind-${option.kind}`,
+      "aria-selected": index === roots.active ? "true" : "false",
+      dataset: { index },
+      onpointerdown: (event) => event.preventDefault(),
+      onclick: () => act(option),
+      onpointermove: () => index !== roots.active && setActive(index, false),
+    },
+    h("span", { class: "roots-kind" }, option.kind === "new" ? "new root" : KIND_LABEL[option.kind]),
+    h("span", { class: "roots-path" }, dir && h("span", { class: "dir" }, dir), h("span", { class: "name" }, name || dir)),
+    option.title && h("span", { class: "roots-action" }, option.title),
+    option.opened != null && h("span", { class: "roots-when" }, relativeTime(option.opened)),
+    option.kind === "folder" && h("span", { class: "roots-action" }, "Tab to go in"),
+    option.opened != null &&
+      h("button", {
+        type: "button",
+        class: "quiet roots-forget",
+        title: "Take this off the recent list",
+        "aria-label": `Take ${option.label} off the recent list`,
+        onclick: async (event) => {
+          event.stopPropagation();
+          await request("DELETE", "/api/roots/recent", { path: option.path }).catch(fail);
+          searchRoots(true);
+        },
+      }, "×"),
+  );
+  return row;
+}
+
+function renderRoots() {
+  const list = $("#roots-list");
+  const options = rootOptions();
+  roots.options = options;
+  if (roots.active >= options.length) roots.active = options.length - 1;
+  if (roots.active < 0 && options.length) roots.active = 0;
+  const rows = [];
+  let group = null;
+  options.forEach((option, index) => {
+    if (option.group && option.group !== group) {
+      group = option.group;
+      rows.push(h("li", { role: "presentation", class: "roots-group" }, group));
+    }
+    rows.push(optionRow(option, index));
+  });
+  list.replaceChildren(...rows);
+  const open = document.activeElement === $("#roots-query") && rows.length > 0;
+  list.hidden = !open;
+  $("#roots-query").setAttribute("aria-expanded", open);
+  setActive(roots.active, false);
+  renderRootsStatus();
+}
+
+function renderRootsStatus() {
+  const typed = roots.typed;
+  const query = (roots.query || "").trim();
+  let text = "";
+  if (typed?.kind === "file") text = `${typed.label} is a file, not a folder.`;
+  else if (typed?.kind === "missing" && !typed.creatable) text = `Nothing is at ${typed.label}, nor at the folder it would go in.`;
+  else if (roots.scanning) text = `Looking through your folders for repositories… ${roots.lookedAt.toLocaleString()} so far.`;
+  else if (!isTyped(query) && query && !roots.hits.length) text = "No repository found by that name. Try a path, or choose a folder.";
+  $("#roots-status").textContent = text;
+}
+
+function setActive(index, scroll = true) {
+  roots.active = index;
+  for (const row of document.querySelectorAll("#roots-list [role=option]")) {
+    row.setAttribute("aria-selected", Number(row.dataset.index) === index ? "true" : "false");
+  }
+  const row = $(`#roots-option-${index}`);
+  const input = $("#roots-query");
+  if (row) input.setAttribute("aria-activedescendant", row.id);
+  else input.removeAttribute("aria-activedescendant");
+  if (row && scroll) row.scrollIntoView({ block: "nearest" });
+}
+
+/** Asks for what matches the box, and again while the device is still being looked through. */
+async function searchRoots(force = false) {
+  const query = $("#roots-query").value;
+  if (!force && query === roots.query) return;
+  const seq = ++roots.seq;
+  clearTimeout(roots.timer);
+  let found;
+  try {
+    found = await api("/api/roots", { q: query.trim() });
+  } catch (err) {
+    if (seq === roots.seq) $("#roots-status").textContent = err.message;
+    return;
+  }
+  if (seq !== roots.seq) return;
+  const changed = query !== roots.query;
+  Object.assign(roots, { query, hits: found.hits, typed: found.typed, scanning: found.scanning, lookedAt: found.looked_at });
+  if (changed) roots.active = 0;
+  renderRoots();
+  if (found.scanning) roots.timer = setTimeout(() => searchRoots(true), 700);
+}
+
+/** Puts `path` in the box, ready to go further into it. */
+function goInto(path) {
+  const input = $("#roots-query");
+  input.value = path.endsWith("/") ? path : `${path}/`;
+  input.classList.add("typed");
+  input.focus();
+  searchRoots();
+}
+
+async function startRoot(path) {
+  if (roots.busy) return;
+  roots.busy = true;
+  try {
+    const made = await post("/api/roots/init", { path });
+    toast(`Started a new root at ${made.root}.`);
+    openRoot(made.root);
+  } catch (err) {
+    fail(err);
+  } finally {
+    roots.busy = false;
+  }
+}
+
+function act(option) {
+  if (!option) return;
+  if (option.action === "open") openRoot(option.path);
+  else if (option.action === "init") startRoot(option.path);
+  else if (option.action === "into") goInto(option.label);
+}
+
+/**
+ * Offers to start a root in a folder that is in no repository: the one
+ * projj was started in, or one just chosen. A root opens straight away.
+ */
+function offer(look, lede) {
+  const box = $("#roots-offer");
+  if (!look) return void (box.hidden = true);
+  if (look.kind === "root") return openRoot(look.root);
+  if (look.kind === "file") return toast(`${look.label} is a file, not a folder.`, true);
+  if (look.kind === "missing" && !look.creatable) return toast(`Nothing is at ${look.label}.`, true);
+  box.replaceChildren(
+    h("p", null, lede, " ", h("strong", { class: "roots-offer-path" }, look.label), look.kind === "missing" ? ", which does not exist yet." : ", which is not in a git repository yet."),
+    h("p", { class: "roots-offer-note" }, "Starting a root there makes it a git repository with an empty track/ folder, ready for jj repositories. Nothing else is written."),
+    h(
+      "div",
+      { class: "roots-offer-actions" },
+      h("button", { type: "button", class: "mark", onclick: () => startRoot(look.path) }, "Start a new root here"),
+      h("button", { type: "button", class: "quiet", onclick: () => offer(null) }, "Not now"),
+    ),
+  );
+  box.hidden = false;
+}
+
+async function chooseFolder() {
+  const button = $("#roots-choose");
+  button.disabled = true;
+  // Starts where the box points, if it points at a folder.
+  const start = roots.typed?.kind === "folder" || roots.typed?.kind === "root" ? roots.typed.path : null;
+  try {
+    const look = await post("/api/roots/choose", { start });
+    if (look) offer(look, "You chose");
+  } catch (err) {
+    fail(err);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function bindRoots() {
+  const input = $("#roots-query");
+  let timer;
+  input.addEventListener("input", () => {
+    input.classList.toggle("typed", isTyped(input.value));
+    clearTimeout(timer);
+    timer = setTimeout(searchRoots, isTyped(input.value) ? 60 : 120);
+  });
+  input.addEventListener("focus", () => renderRoots());
+  input.addEventListener("blur", () => {
+    $("#roots-list").hidden = true;
+    input.setAttribute("aria-expanded", "false");
+  });
+  input.addEventListener("keydown", async (event) => {
+    const acting = event.key === "Enter" || (event.key === "Tab" && !event.shiftKey && isTyped(input.value));
+    if (acting) event.preventDefault();
+    // What was typed last may not have been looked up yet.
+    if (acting && input.value !== roots.query) {
+      clearTimeout(timer);
+      await searchRoots();
+    }
+    const options = roots.options || [];
+    const option = options[roots.active];
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if ($("#roots-list").hidden) return renderRoots();
+      if (!options.length) return;
+      const step = event.key === "ArrowDown" ? 1 : -1;
+      setActive((roots.active + step + options.length) % options.length);
+    } else if (event.key === "Enter") {
+      act(option);
+    } else if (acting) {
+      // Tab completes the path, folder by folder, as a shell does.
+      const into = option && option.kind !== "new" ? option : options.find((each) => each.kind !== "new");
+      if (into) goInto(into.label);
+    } else if (event.key === "Escape") {
+      if (input.value) {
+        input.value = "";
+        searchRoots();
+      } else input.blur();
+    }
+  });
+  $("#roots-choose").addEventListener("click", chooseFolder);
+}
+
+/** Shows the chooser instead of a review. `path` is a folder to offer to start a root in, `notice` why it is shown. */
+async function enterRoots({ begin = null, path = null, notice = null } = {}) {
+  state.rootPath = null;
+  state.view = "roots";
+  document.body.dataset.mode = "roots";
+  for (const id of ["#review", "#history"]) $(id).hidden = true;
+  $("#roots").hidden = false;
+  document.title = "Choose a projj \u2013 projj";
+  renderMenu();
+  desktop?.showing(null, document.title);
+  bindRoots();
+  if (notice) toast(notice, true);
+  begin ??= await api("/api/start").catch((err) => (fail(err), null));
+  $("#roots-choose").hidden = !begin?.chooser;
+  if (path) {
+    const look = await api("/api/roots/inspect", { path }).catch(() => null);
+    if (look && look.kind !== "root") offer(look, "This is");
+  } else if (begin?.here && begin.here.kind !== "root") {
+    offer(begin.here, "projj was started in");
+  }
+  $("#roots-query").focus();
+  await searchRoots(true);
 }
 
 // ------------------------------------------------------------- app shell
@@ -2976,12 +3623,12 @@ function bind() {
 
 /** Picks up edits made by agents or in a terminal while the page is open. */
 function poll() {
-  if (document.visibilityState !== "visible" || state.view !== "review") return;
+  if (document.visibilityState !== "visible" || state.view !== "review" || !state.rootPath) return;
   loadStatus().catch(() => {});
 }
 
 function onKey(event) {
-  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.metaKey || event.ctrlKey || event.altKey || state.view === "roots") return;
   if (event.target.closest?.("input, select, textarea, dialog")) return;
   const review = state.view === "review";
   const actions = {
@@ -3013,11 +3660,21 @@ async function start() {
   // Wrapping changes as the stream narrows or widens; keep the reader's place.
   widthHandle($("#review .side"), "side-width", "Resize the review file list", keepPlace);
   bind();
+  bindMenu();
+  const params = new URLSearchParams(location.search);
+  if (params.has("roots")) return enterRoots({ path: params.get("path") });
+  state.rootPath = params.get("root");
+  if (!state.rootPath) {
+    const begin = await api("/api/start").catch((err) => (fail(err), null));
+    if (!begin?.root) return enterRoots({ begin });
+    state.rootPath = begin.root;
+    history.replaceState(null, "", rootUrl(begin.root) + location.hash);
+  }
+  document.body.dataset.mode = "review";
   try {
     await loadRoot();
   } catch (err) {
-    fail(err);
-    return;
+    return enterRoots({ path: state.rootPath, notice: `${state.rootPath} cannot be reviewed: ${err.message}` });
   }
   readHash();
   if (!allWorkspaces().some((ws) => ws.path === state.ws)) state.ws = allWorkspaces()[0]?.path || null;

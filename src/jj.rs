@@ -772,7 +772,7 @@ mod tests {
     use super::*;
 
     /// Builds the scratch root from `scripts/make-scratch-root.sh` and returns
-    /// its `sdk-0` workspace, or `None` where the `jj` executable is missing.
+    /// its `sts-0` workspace, or `None` where the `jj` executable is missing.
     fn scratch_workspace() -> Option<(tempfile::TempDir, PathBuf)> {
         if Command::new("jj").arg("--version").output().is_err() {
             eprintln!("skipping: jj is not installed");
@@ -787,7 +787,7 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        let workspace = root.join("track/example.com/acme/widgets.git/sdk-0");
+        let workspace = root.join("track/example.com/acme/widgets.git/sts-0");
         Some((dir, workspace))
     }
 
@@ -799,7 +799,7 @@ mod tests {
         let session = Jj::load().unwrap().open(&workspace).unwrap();
         pollster::block_on(async {
             let info = session.info().await.unwrap();
-            assert_eq!(info.name, "sdk-0");
+            assert_eq!(info.name, "sts-0");
             assert_eq!(info.working_copy.unwrap().description, "Add later()\n");
 
             let log = session.log(Some("::@ ~ root()"), 10).await.unwrap();
@@ -882,7 +882,7 @@ mod tests {
 
             let operations = session.operations(3).await.unwrap();
             assert_eq!(operations.len(), 3);
-            assert_eq!(operations[0].workspace.as_deref(), Some("sdk-0"));
+            assert_eq!(operations[0].workspace.as_deref(), Some("sts-0"));
         });
     }
 }

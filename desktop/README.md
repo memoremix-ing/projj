@@ -33,9 +33,15 @@ app's Rust main process. What differs is how the page reaches it.
 
 ## Use
 
-Open the app. The first time it asks for a folder: pick a projj root, or any
-folder inside one. Each window reviews one root; File > Open Folder… (⌘O)
-opens another. The roots open when you quit come back next time. Settings
+Open the app. The first time it shows the page for choosing a root, the
+same one `projj serve` shows outside a repository: search the repositories
+on the machine, type a path, or Choose folder… for the app's own folder
+dialog, and start a new root in a folder that has none. Each window reviews
+one root; the projj button at the top left opens a panel whose "Choose a
+projj" goes back to choosing another;
+File > New Window (⌘N) opens another chooser, and File > Open Folder… (⌘O)
+goes straight to a folder. The roots open when you quit come back next
+time. Settings
 and unsaved edits are kept in the same device store as for `projj serve`,
 so both see the same ones.
 
@@ -76,5 +82,7 @@ PROJJ_DATA_DIR=/tmp/projj-scratch-data \
 - Running a stable build's `projj.app` installs it: it unpacks itself and
   keeps CEF's profile in `~/Library/Application Support/com.memoremix.projj/`.
 - The page's Download button (in Tweaks) is hidden; Copy still works.
-- Open Folder…'s dialog, and the message shown for a folder outside any
-  root, have not been tried yet: automation cannot click native dialogs.
+- The folder dialog (Choose folder… and Open Folder…) has not been tried
+  yet: automation cannot click native dialogs. The rest of choosing roots
+  was tried in a dev build: opening one, going back to choose, and reopening
+  at the next start.

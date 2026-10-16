@@ -1,22 +1,29 @@
 //! HTTP surface: a JSON API under `/api` plus the embedded web client.
 
+use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
 use axum::Json;
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::FromRequestParts;
 use axum::extract::Query;
 use axum::extract::Request;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::http::header;
+use axum::http::request::Parts;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use axum::routing::delete;
 use axum::routing::get;
 use axum::routing::post;
 use serde::Deserialize;
@@ -24,10 +31,13 @@ use serde::Serialize;
 use serde_json::json;
 use tower::ServiceExt as _;
 
+use crate::chooser::Chooser;
 use crate::files;
 use crate::files::Eol;
 use crate::files::FileError;
 use crate::files::TextFile;
+use crate::finder;
+use crate::finder::Finder;
 use crate::git::Git;
 use crate::git::GitError;
 use crate::git::Side;
@@ -36,6 +46,7 @@ use crate::git::StatusEntry;
 use crate::jj::Jj;
 use crate::jj::Session;
 use crate::root;
+use crate::root::Place;
 use crate::root::Repo;
 use crate::store;
 use crate::store::StoreError;
@@ -57,29 +68,52 @@ const STYLE_CSS: &str = include_str!("../web/style.css");
 /// rather than recomputed for each of a page's requests.
 const DISCOVERY_TTL: Duration = Duration::from_secs(2);
 
+/// A walk of the device for repositories is redone when asked for this long
+/// after the last one.
+const SEARCH_FRESH: Duration = Duration::from_secs(5 * 60);
+const SEARCH_HITS: usize = 60;
+
+/// Each page names the root it is about in this header, its path written
+/// with `encodeURIComponent`. Pages on different roots can be open at once,
+/// so the server never has a "current" root to get wrong.
+pub const ROOT_HEADER: &str = "x-projj-root";
+
+/// The server: what every root shares, and the roots pages have opened.
 pub struct App {
-    pub root: PathBuf,
-    pub git: Git,
     pub jj: Jj,
     /// Serve the client from this directory instead of the embedded copy.
     pub web_dir: Option<PathBuf>,
-    /// Unsaved editor text and settings, shared with every other server on
-    /// the device.
+    /// Unsaved editor text, settings and recent roots, shared with every
+    /// other server on the device.
     pub store: store::Store,
-    /// What this root's drafts are filed under in that store.
+    /// The root a page opens when it names none: the one around the folder
+    /// `projj serve` was started in.
+    pub default_root: Option<PathBuf>,
+    /// Where projj was started, when that is in no repository: the page
+    /// offers to start a root there.
+    pub start_dir: Option<PathBuf>,
+    finder: Arc<Finder>,
+    chooser: Option<Chooser>,
+    /// A folder chooser is showing; there is only ever one.
+    choosing: AtomicBool,
+    roots: Mutex<HashMap<PathBuf, Arc<Root>>>,
+}
+
+/// One root, as pages review it.
+pub struct Root {
+    pub path: PathBuf,
+    pub git: Git,
+    /// What this root's drafts are filed under in the store.
     drafts_root: String,
     repos: Mutex<Option<(Instant, Arc<Vec<Repo>>)>>,
 }
 
-impl App {
-    pub fn new(root: PathBuf, jj: Jj, web_dir: Option<PathBuf>, store: store::Store) -> Self {
+impl Root {
+    fn new(path: PathBuf) -> Self {
         Self {
-            git: Git::new(&root),
-            drafts_root: store::root_key(&root),
-            root,
-            jj,
-            web_dir,
-            store,
+            git: Git::new(&path),
+            drafts_root: store::root_key(&path),
+            path,
             repos: Mutex::new(None),
         }
     }
@@ -91,13 +125,108 @@ impl App {
         {
             return Ok(repos.clone());
         }
-        let app = self.clone();
-        let repos = tokio::task::spawn_blocking(move || root::discover(&app.root))
+        let root = self.clone();
+        let repos = tokio::task::spawn_blocking(move || root::discover(&root.path))
             .await
             .map_err(|err| ApiError::Internal(err.into()))??;
         let repos = Arc::new(repos);
         *self.repos.lock().unwrap() = Some((Instant::now(), repos.clone()));
         Ok(repos)
+    }
+}
+
+impl App {
+    pub fn new(jj: Jj, web_dir: Option<PathBuf>, store: store::Store) -> Self {
+        Self {
+            jj,
+            web_dir,
+            store,
+            default_root: None,
+            start_dir: None,
+            finder: Finder::new(finder::search_dirs()),
+            chooser: None,
+            choosing: AtomicBool::new(false),
+            roots: Mutex::default(),
+        }
+    }
+
+    /// Opens `root` for pages that name no root.
+    pub fn with_default_root(mut self, root: Option<PathBuf>) -> Self {
+        self.default_root = root;
+        self
+    }
+
+    /// Offers to start a root in `dir`, where projj was started, if that is
+    /// in no repository.
+    pub fn with_start_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.start_dir = dir;
+        self
+    }
+
+    pub fn with_chooser(mut self, chooser: Option<Chooser>) -> Self {
+        self.chooser = chooser;
+        self
+    }
+
+    /// Looks for repositories under `dirs` instead of the home folder.
+    pub fn with_search_dirs(mut self, dirs: Vec<PathBuf>) -> Self {
+        self.finder = Finder::new(dirs);
+        self
+    }
+
+    /// The root at `path`, which must be the top of a git repository.
+    async fn root(&self, path: &Path) -> Result<Arc<Root>, ApiError> {
+        if let Some(root) = self.roots.lock().unwrap().get(path) {
+            return Ok(root.clone());
+        }
+        if !path.is_absolute() {
+            return Err(ApiError::BadRequest(format!(
+                "not a full path: {}",
+                path.display()
+            )));
+        }
+        let asked = path.to_owned();
+        // A root may be named through a link (`/tmp` for `/private/tmp`).
+        let (canonical, resolved) = tokio::task::spawn_blocking(move || {
+            let canonical = asked.canonicalize()?;
+            anyhow::Ok((canonical.clone(), root::resolve(&canonical)?))
+        })
+        .await
+        .map_err(|err| ApiError::Internal(err.into()))?
+        .map_err(|err| ApiError::NotFound(format!("{err:#}")))?;
+        match resolved {
+            Some(resolved) if resolved.root == canonical => {
+                let root = Arc::new(Root::new(resolved.root));
+                let mut roots = self.roots.lock().unwrap();
+                Ok(roots.entry(path.to_owned()).or_insert(root).clone())
+            }
+            Some(resolved) => Err(ApiError::NotFound(format!(
+                "{} is not a root; the root around it is {}",
+                path.display(),
+                resolved.root.display()
+            ))),
+            None => Err(ApiError::NotFound(format!(
+                "{} is in no git repository",
+                path.display()
+            ))),
+        }
+    }
+}
+
+/// The root a request names in `ROOT_HEADER`.
+struct Here(Arc<Root>);
+
+impl FromRequestParts<AppState> for Here {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
+        let Some(value) = parts.headers.get(ROOT_HEADER) else {
+            return Err(ApiError::BadRequest("no root chosen".into()));
+        };
+        let path = percent_encoding::percent_decode(value.as_bytes())
+            .decode_utf8()
+            .map_err(|_| ApiError::BadRequest("the root is not valid UTF-8".into()))?;
+        Ok(Here(app.root(Path::new(path.as_ref())).await?))
     }
 }
 
@@ -173,12 +302,23 @@ pub fn router(app: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/highlight.js", get(highlight_js))
         .route("/style.css", get(style_css))
+        .route("/api/start", get(get_start))
+        .route("/api/roots", get(roots_search))
+        .route("/api/roots/inspect", get(roots_inspect))
+        .route("/api/roots/init", post(roots_init))
+        .route("/api/roots/choose", post(roots_choose))
+        .route("/api/roots/recent", delete(roots_forget))
         .route("/api/root", get(get_root))
         .route("/api/review/status", get(review_status))
         .route("/api/review/diff", get(review_diff))
         .route("/api/review/apply", post(review_apply))
         .route("/api/review/apply-files", post(review_apply_files))
-        .route("/api/file", get(file_read).post(file_write))
+        .route(
+            "/api/file",
+            get(file_read).post(file_write).delete(file_delete),
+        )
+        .route("/api/file/create", post(file_create))
+        .route("/api/file/rename", post(file_rename))
         .route("/api/file/rebase", post(file_rebase))
         .route("/api/files", get(file_list))
         .route("/api/settings", get(settings_list).post(settings_set))
@@ -207,14 +347,24 @@ impl Local {
         Self(router(app))
     }
 
-    /// Answers one request. Returns the status and the body as text.
-    pub async fn call(&self, method: &str, uri: &str, body: String) -> (u16, String) {
-        let request = match Request::builder()
+    /// Answers one request about `root` (as the page wrote it in
+    /// `ROOT_HEADER`), or about no root. Returns the status and the body as
+    /// text.
+    pub async fn call(
+        &self,
+        method: &str,
+        uri: &str,
+        root: Option<&str>,
+        body: String,
+    ) -> (u16, String) {
+        let mut request = Request::builder()
             .method(method)
             .uri(uri)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(axum::body::Body::from(body))
-        {
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(root) = root {
+            request = request.header(ROOT_HEADER, root);
+        }
+        let request = match request.body(axum::body::Body::from(body)) {
             Ok(request) => request,
             Err(err) => return (400, json!({ "error": err.to_string() }).to_string()),
         };
@@ -268,23 +418,214 @@ async fn style_css(State(app): State<AppState>) -> Response {
 #[derive(Serialize)]
 struct RootInfo {
     path: String,
+    /// The path with `~` for the home folder.
+    label: String,
     name: String,
+    /// The root has a `track/` directory.
+    projj: bool,
     /// Which git answers: `installed` or `built-in`.
     git: crate::git::Engine,
     repos: Arc<Vec<Repo>>,
 }
 
-async fn get_root(State(app): State<AppState>) -> ApiResult<RootInfo> {
+/// Opens a root: tells the page about it, and puts it first among the
+/// recent ones.
+async fn get_root(State(app): State<AppState>, Here(root): Here) -> ApiResult<RootInfo> {
+    let path = root.path.display().to_string();
+    app.store
+        .opened_root(&path, chrono::Utc::now().timestamp_millis())
+        .await?;
     Ok(Json(RootInfo {
-        path: app.root.display().to_string(),
-        name: app
-            .root
+        label: finder::tilde(&root.path),
+        name: root
+            .path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        git: app.git.engine(),
-        repos: app.repos().await?,
+            .unwrap_or_else(|| path.clone()),
+        projj: root.path.join(root::TRACK_DIR).is_dir(),
+        git: root.git.engine(),
+        repos: root.repos().await?,
+        path,
     }))
+}
+
+/// A folder someone has typed or chosen, and what opening it would do.
+#[derive(Serialize)]
+struct Look {
+    path: String,
+    label: String,
+    #[serde(flatten)]
+    place: Place,
+    /// The root it opens, with `~` for the home folder.
+    root_label: Option<String>,
+}
+
+fn look(path: PathBuf, place: Place) -> Look {
+    Look {
+        label: finder::tilde(&path),
+        path: path.display().to_string(),
+        root_label: match &place {
+            Place::Root { resolved, .. } => Some(finder::tilde(&resolved.root)),
+            _ => None,
+        },
+        place,
+    }
+}
+
+async fn inspect(path: PathBuf) -> Result<Look, ApiError> {
+    let (path, place) = tokio::task::spawn_blocking(move || root::inspect(&path))
+        .await
+        .map_err(|err| ApiError::Internal(err.into()))?
+        .map_err(|err| ApiError::BadRequest(format!("{err:#}")))?;
+    Ok(look(path, place))
+}
+
+#[derive(Serialize)]
+struct Start {
+    /// The root to open when the page names none.
+    root: Option<String>,
+    /// Where projj was started, when that is in no repository.
+    here: Option<Look>,
+    /// A folder chooser can be shown.
+    chooser: bool,
+    git: crate::git::Engine,
+}
+
+/// What a page that names no root should do: open the default root, or help
+/// choose one.
+async fn get_start(State(app): State<AppState>) -> ApiResult<Start> {
+    let here = match (&app.default_root, &app.start_dir) {
+        (None, Some(dir)) => inspect(dir.clone()).await.ok(),
+        _ => None,
+    };
+    Ok(Json(Start {
+        root: app
+            .default_root
+            .as_ref()
+            .map(|root| root.display().to_string()),
+        here,
+        chooser: app.chooser.is_some(),
+        git: crate::git::Engine::detect(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    #[serde(default)]
+    q: String,
+}
+
+#[derive(Serialize)]
+struct SearchResult {
+    hits: Vec<finder::Hit>,
+    /// The device is still being looked through; ask again for more.
+    scanning: bool,
+    looked_at: usize,
+    /// What the query names, when it is a path.
+    typed: Option<Look>,
+}
+
+/// Roots to choose from. A query that starts with `/` or `~` is a path: the
+/// answer is the folders that complete it, and what is at it. Anything else
+/// is searched for among recent roots and the repositories on the device.
+async fn roots_search(
+    State(app): State<AppState>,
+    Query(query): Query<SearchQuery>,
+) -> ApiResult<SearchResult> {
+    app.finder.look(SEARCH_FRESH);
+    let progress = app.finder.progress();
+    let typed = query.q.trim();
+    if typed.starts_with('/') || typed.starts_with('~') {
+        let completing = typed.to_owned();
+        let hits = tokio::task::spawn_blocking(move || finder::complete(&completing, SEARCH_HITS))
+            .await
+            .map_err(|err| ApiError::Internal(err.into()))?;
+        return Ok(Json(SearchResult {
+            hits,
+            scanning: progress.scanning,
+            looked_at: progress.looked_at,
+            typed: inspect(PathBuf::from(typed)).await.ok(),
+        }));
+    }
+    let recent = app.store.recent_roots().await?;
+    let words = typed.to_owned();
+    let hits = tokio::task::spawn_blocking(move || {
+        finder::search(&words, &progress.found, &recent, SEARCH_HITS)
+    })
+    .await
+    .map_err(|err| ApiError::Internal(err.into()))?;
+    Ok(Json(SearchResult {
+        hits,
+        scanning: progress.scanning,
+        looked_at: progress.looked_at,
+        typed: None,
+    }))
+}
+
+#[derive(Deserialize)]
+struct PathQuery {
+    path: String,
+}
+
+async fn roots_inspect(Query(query): Query<PathQuery>) -> ApiResult<Look> {
+    Ok(Json(inspect(PathBuf::from(query.path)).await?))
+}
+
+#[derive(Deserialize)]
+struct PathBody {
+    path: String,
+}
+
+/// Starts a new root: a git repository with an empty `track/`.
+async fn roots_init(Json(request): Json<PathBody>) -> ApiResult<serde_json::Value> {
+    let path = PathBuf::from(request.path);
+    let root = tokio::task::spawn_blocking(move || root::init(&path))
+        .await
+        .map_err(|err| ApiError::Internal(err.into()))?
+        .map_err(|err| ApiError::Conflict(format!("{err:#}")))?;
+    Ok(Json(json!({ "root": root.display().to_string() })))
+}
+
+#[derive(Deserialize)]
+struct ChooseRequest {
+    /// The folder the chooser starts in; the home folder if left out.
+    start: Option<String>,
+}
+
+/// Shows the folder chooser and waits for the person. Answers what they
+/// chose, and what is there, or `null` if they cancelled.
+async fn roots_choose(
+    State(app): State<AppState>,
+    Json(request): Json<ChooseRequest>,
+) -> ApiResult<Option<Look>> {
+    let Some(chooser) = app.chooser.clone() else {
+        return Err(ApiError::NotFound("no folder chooser here".into()));
+    };
+    if app.choosing.swap(true, Ordering::AcqRel) {
+        return Err(ApiError::Conflict(
+            "a folder chooser is already open".into(),
+        ));
+    }
+    let start = request
+        .start
+        .map(PathBuf::from)
+        .filter(|start| start.is_dir())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let chosen = tokio::task::spawn_blocking(move || chooser(&start)).await;
+    app.choosing.store(false, Ordering::Release);
+    match chosen.map_err(|err| ApiError::Internal(err.into()))?? {
+        Some(path) => Ok(Json(Some(inspect(path).await?))),
+        None => Ok(Json(None)),
+    }
+}
+
+async fn roots_forget(
+    State(app): State<AppState>,
+    Query(query): Query<PathQuery>,
+) -> ApiResult<serde_json::Value> {
+    app.store.forget_root(&query.path).await?;
+    Ok(Json(json!({})))
 }
 
 #[derive(Serialize)]
@@ -302,13 +643,13 @@ struct ReviewStatus {
     entries: Vec<ReviewEntry>,
 }
 
-async fn review_status(State(app): State<AppState>) -> ApiResult<ReviewStatus> {
+async fn review_status(Here(root): Here) -> ApiResult<ReviewStatus> {
     let Status {
         branch,
         head,
         entries,
-    } = app.git.status().await?;
-    let repos = app.repos().await?;
+    } = root.git.status().await?;
+    let repos = root.repos().await?;
     let entries = entries
         .into_iter()
         .map(|entry| ReviewEntry {
@@ -335,11 +676,11 @@ struct ReviewDiffQuery {
 }
 
 async fn review_diff(
-    State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<ReviewDiffQuery>,
 ) -> Result<Response, ApiError> {
     let context = context_or_default(query.context);
-    let diff = app
+    let diff = root
         .git
         .highlighted_file_diff(&query.path, query.side, context)
         .await?;
@@ -368,14 +709,14 @@ struct ApplyRequest {
 }
 
 async fn review_apply(
-    State(app): State<AppState>,
+    Here(root): Here,
     Json(request): Json<ApplyRequest>,
 ) -> ApiResult<serde_json::Value> {
     let side = match request.action {
         Action::Stage => Side::Unstaged,
         Action::Unstage => Side::Staged,
     };
-    app.git
+    root.git
         .apply_hunk(
             &request.path,
             side,
@@ -394,12 +735,12 @@ struct ApplyFilesRequest {
 }
 
 async fn review_apply_files(
-    State(app): State<AppState>,
+    Here(root): Here,
     Json(request): Json<ApplyFilesRequest>,
 ) -> ApiResult<serde_json::Value> {
     match request.action {
-        Action::Stage => app.git.stage_paths(&request.paths).await?,
-        Action::Unstage => app.git.unstage_paths(&request.paths).await?,
+        Action::Stage => root.git.stage_paths(&request.paths).await?,
+        Action::Unstage => root.git.unstage_paths(&request.paths).await?,
     }
     Ok(Json(json!({ "ok": true })))
 }
@@ -410,11 +751,8 @@ struct FileQuery {
     path: String,
 }
 
-async fn file_read(
-    State(app): State<AppState>,
-    Query(query): Query<FileQuery>,
-) -> ApiResult<TextFile> {
-    Ok(Json(files::read(&app.root, &query.path)?))
+async fn file_read(Here(root): Here, Query(query): Query<FileQuery>) -> ApiResult<TextFile> {
+    Ok(Json(files::read(&root.path, &query.path)?))
 }
 
 #[derive(Deserialize)]
@@ -431,17 +769,61 @@ struct FileWrite {
 /// Rewrites an existing worktree file. This never stages anything: the edit
 /// shows up as one more change to review.
 async fn file_write(
-    State(app): State<AppState>,
+    Here(root): Here,
     Json(request): Json<FileWrite>,
 ) -> ApiResult<serde_json::Value> {
     let version = files::write(
-        &app.root,
+        &root.path,
         &request.path,
         &request.content,
         request.eol,
         request.base.as_deref(),
     )?;
     Ok(Json(json!({ "version": version })))
+}
+
+#[derive(Deserialize)]
+struct FileCreate {
+    path: String,
+    kind: files::Kind,
+}
+
+/// Makes an empty file or a folder, and any folders it goes in; 409 if
+/// something is there already. Nothing is staged: a new file is one more
+/// change to review.
+async fn file_create(
+    Here(root): Here,
+    Json(request): Json<FileCreate>,
+) -> ApiResult<serde_json::Value> {
+    files::create(&root.path, &request.path, request.kind)?;
+    Ok(Json(json!({ "path": request.path })))
+}
+
+#[derive(Deserialize)]
+struct FileRename {
+    from: String,
+    to: String,
+}
+
+/// Renames or moves a file or a folder; 409 if something is at `to`. A
+/// folder holding a repository or a jj workspace is refused. Nothing is
+/// staged: git sees a deletion and a new file, to review like any others.
+async fn file_rename(
+    Here(root): Here,
+    Json(request): Json<FileRename>,
+) -> ApiResult<serde_json::Value> {
+    let kind = files::rename(&root.path, &request.from, &request.to)?;
+    Ok(Json(json!({ "kind": kind, "path": request.to })))
+}
+
+/// Deletes a file, or a folder and everything in it, unless the folder holds
+/// a repository or a jj workspace. Nothing is staged.
+async fn file_delete(
+    Here(root): Here,
+    Query(query): Query<FileQuery>,
+) -> ApiResult<serde_json::Value> {
+    let kind = files::delete(&root.path, &query.path)?;
+    Ok(Json(json!({ "kind": kind })))
 }
 
 #[derive(Deserialize)]
@@ -456,11 +838,11 @@ struct FileRebase {
 /// Works out what unsaved edits look like on top of the file as it is now.
 /// Nothing is written; the caller decides what to do with the answer.
 async fn file_rebase(
-    State(app): State<AppState>,
+    Here(root): Here,
     Json(request): Json<FileRebase>,
 ) -> ApiResult<files::Rebase> {
     Ok(Json(files::rebase(
-        &app.root,
+        &root.path,
         &request.path,
         &request.base,
         &request.content,
@@ -468,8 +850,8 @@ async fn file_rebase(
 }
 
 /// Lists the files an explorer should offer: everything git does not ignore.
-async fn file_list(State(app): State<AppState>) -> ApiResult<serde_json::Value> {
-    Ok(Json(json!({ "files": app.git.files().await? })))
+async fn file_list(Here(root): Here) -> ApiResult<serde_json::Value> {
+    Ok(Json(json!({ "files": root.git.files().await? })))
 }
 
 /// Display settings, shared by every root and every server on the device.
@@ -508,8 +890,11 @@ async fn settings_set(
 }
 
 /// The unsaved edits kept for this root, wherever they were typed.
-async fn drafts_list(State(app): State<AppState>) -> ApiResult<serde_json::Value> {
-    let drafts = app.store.drafts(&app.drafts_root).await?;
+async fn drafts_list(
+    State(app): State<AppState>,
+    Here(root): Here,
+) -> ApiResult<serde_json::Value> {
+    let drafts = app.store.drafts(&root.drafts_root).await?;
     Ok(Json(json!({
         "store": app.store.file().display().to_string(),
         "drafts": drafts,
@@ -520,46 +905,48 @@ async fn drafts_list(State(app): State<AppState>) -> ApiResult<serde_json::Value
 /// worktree, and the file need not exist any more.
 async fn drafts_put(
     State(app): State<AppState>,
+    Here(root): Here,
     Json(update): Json<store::Update>,
 ) -> ApiResult<serde_json::Value> {
     files::check_path(&update.path)?;
-    app.store.put_draft(&app.drafts_root, update).await?;
+    app.store.put_draft(&root.drafts_root, update).await?;
     Ok(Json(json!({})))
 }
 
 async fn drafts_remove(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<FileQuery>,
 ) -> ApiResult<serde_json::Value> {
     app.store
-        .remove_draft(&app.drafts_root, &query.path)
+        .remove_draft(&root.drafts_root, &query.path)
         .await?;
     Ok(Json(json!({})))
 }
 
 /// Resolves the `ws` parameter to a discovered workspace directory. Only
 /// paths found by discovery are accepted, so the value cannot point elsewhere.
-async fn workspace_dir(app: &AppState, ws: &str) -> Result<PathBuf, ApiError> {
-    let known = app
+async fn workspace_dir(root: &Arc<Root>, ws: &str) -> Result<PathBuf, ApiError> {
+    let known = root
         .repos()
         .await?
         .iter()
         .flat_map(|repo| &repo.workspaces)
         .any(|workspace| workspace.path == ws);
     if known {
-        Ok(app.root.join(ws))
+        Ok(root.path.join(ws))
     } else {
         Err(ApiError::NotFound(format!("unknown workspace: {ws}")))
     }
 }
 
 /// Runs a jj query on a blocking thread; `jj-lib` futures are not `Send`.
-async fn with_session<T, F>(app: AppState, ws: String, query: F) -> ApiResult<T>
+async fn with_session<T, F>(app: AppState, root: Arc<Root>, ws: String, query: F) -> ApiResult<T>
 where
     T: Send + 'static,
     F: AsyncFnOnce(&Session) -> anyhow::Result<T> + Send + 'static,
 {
-    let dir = workspace_dir(&app, &ws).await?;
+    let dir = workspace_dir(&root, &ws).await?;
     let result = tokio::task::spawn_blocking(move || {
         let session = app.jj.open(&dir)?;
         pollster::block_on(query(&session))
@@ -579,9 +966,10 @@ struct WorkspaceQuery {
 
 async fn jj_workspace(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<WorkspaceQuery>,
 ) -> ApiResult<crate::jj::WorkspaceInfo> {
-    with_session(app, query.ws, async |session| session.info().await).await
+    with_session(app, root, query.ws, async |session| session.info().await).await
 }
 
 #[derive(Deserialize)]
@@ -593,10 +981,11 @@ struct LogQuery {
 
 async fn jj_log(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<LogQuery>,
 ) -> ApiResult<crate::jj::Log> {
     let limit = query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT);
-    with_session(app, query.ws, async move |session| {
+    with_session(app, root, query.ws, async move |session| {
         session.log(query.revset.as_deref(), limit).await
     })
     .await
@@ -612,10 +1001,11 @@ struct FileLogQuery {
 
 async fn jj_file_log(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<FileLogQuery>,
 ) -> ApiResult<crate::jj::Log> {
     let limit = query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT);
-    with_session(app, query.ws, async move |session| {
+    with_session(app, root, query.ws, async move |session| {
         session.file_log(&query.path, limit).await
     })
     .await
@@ -633,10 +1023,11 @@ struct DiffQuery {
 
 async fn jj_diff(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<DiffQuery>,
 ) -> ApiResult<crate::jj::DiffResult> {
     let context = context_or_default(query.context);
-    with_session(app, query.ws, async move |session| {
+    with_session(app, root, query.ws, async move |session| {
         session
             .diff(
                 query.from.as_deref(),
@@ -658,10 +1049,11 @@ struct EvolutionQuery {
 
 async fn jj_evolution(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<EvolutionQuery>,
 ) -> ApiResult<Vec<crate::jj::EvolutionEntry>> {
     let limit = query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT);
-    with_session(app, query.ws, async move |session| {
+    with_session(app, root, query.ws, async move |session| {
         session.evolution(&query.rev, limit).await
     })
     .await
@@ -675,10 +1067,11 @@ struct OperationsQuery {
 
 async fn jj_operations(
     State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<OperationsQuery>,
 ) -> ApiResult<Vec<crate::jj::OperationInfo>> {
     let limit = query.limit.unwrap_or(DEFAULT_LOG_LIMIT).min(MAX_LOG_LIMIT);
-    with_session(app, query.ws, async move |session| {
+    with_session(app, root, query.ws, async move |session| {
         session.operations(limit).await
     })
     .await
@@ -690,10 +1083,10 @@ async fn jj_operations(
 /// one built into projj) so the user's full configuration (ignores,
 /// fsmonitor, size limits) applies.
 async fn jj_snapshot(
-    State(app): State<AppState>,
+    Here(root): Here,
     Query(query): Query<WorkspaceQuery>,
 ) -> ApiResult<serde_json::Value> {
-    let dir = workspace_dir(&app, &query.ws).await?;
+    let dir = workspace_dir(&root, &query.ws).await?;
     let command = crate::bundled_jj::command(["util", "snapshot"])
         .map_err(|err| ApiError::Internal(anyhow::anyhow!("cannot run jj: {err}")))?;
     let output = tokio::process::Command::from(command)
@@ -715,28 +1108,195 @@ async fn jj_snapshot(
 mod tests {
     use super::*;
 
+    fn local(dir: &Path) -> Local {
+        let store = store::Store::new(&dir.join("data"));
+        let app = App::new(Jj::load().unwrap(), None, store).with_search_dirs(vec![dir.to_owned()]);
+        Local::new(Arc::new(app))
+    }
+
+    async fn call(
+        local: &Local,
+        method: &str,
+        uri: &str,
+        root: Option<&Path>,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let root = root.map(|root| {
+            percent_encoding::utf8_percent_encode(
+                &root.display().to_string(),
+                percent_encoding::NON_ALPHANUMERIC,
+            )
+            .to_string()
+        });
+        let body = if body.is_null() {
+            String::new()
+        } else {
+            body.to_string()
+        };
+        let (status, text) = local.call(method, uri, root.as_deref(), body).await;
+        (
+            status,
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
     #[tokio::test]
     async fn answers_in_process() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store::Store::new(dir.path());
-        let app = App::new(dir.path().to_owned(), Jj::load().unwrap(), None, store);
-        let local = Local::new(Arc::new(app));
+        let local = local(dir.path());
 
         let body = json!({ "key": "theme", "value": "dark" }).to_string();
-        assert_eq!(local.call("POST", "/api/settings", body).await.0, 200);
-        let (status, body) = local.call("GET", "/api/settings", String::new()).await;
+        assert_eq!(local.call("POST", "/api/settings", None, body).await.0, 200);
+        let (status, body) = local
+            .call("GET", "/api/settings", None, String::new())
+            .await;
         assert_eq!(status, 200);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&body).unwrap()["settings"]["theme"],
             "dark"
         );
 
-        let (status, body) = local.call("POST", "/api/settings", "{".into()).await;
+        let (status, body) = local.call("POST", "/api/settings", None, "{".into()).await;
         assert_eq!(status, 400, "{body}");
         assert_eq!(
-            local.call("GET", "/api/nothing", String::new()).await.0,
+            local
+                .call("GET", "/api/nothing", None, String::new())
+                .await
+                .0,
             404
         );
-        assert_eq!(local.call("GET", "not a path", String::new()).await.0, 400);
+        assert_eq!(
+            local.call("GET", "not a path", None, String::new()).await.0,
+            400
+        );
+    }
+
+    #[tokio::test]
+    async fn starts_opens_and_remembers_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let local = local(&base);
+        let null = serde_json::Value::Null;
+
+        let (status, start) = call(&local, "GET", "/api/start", None, null.clone()).await;
+        assert_eq!(status, 200);
+        assert_eq!(start["root"], null);
+        assert_eq!(start["chooser"], false);
+
+        // A page must say which root it means, and mean a root.
+        let (status, _) = call(&local, "GET", "/api/review/status", None, null.clone()).await;
+        assert_eq!(status, 400);
+        let fresh = base.join("fresh root");
+        let (status, _) = call(&local, "GET", "/api/root", Some(&fresh), null.clone()).await;
+        assert_eq!(status, 404);
+
+        let path = fresh.display().to_string();
+        let uri = format!(
+            "/api/roots/inspect?path={}",
+            percent_encoding::utf8_percent_encode(&path, percent_encoding::NON_ALPHANUMERIC)
+        );
+        let (_, seen) = call(&local, "GET", &uri, None, null.clone()).await;
+        assert_eq!(
+            (seen["kind"].as_str(), seen["creatable"].as_bool()),
+            (Some("missing"), Some(true))
+        );
+
+        let (status, made) = call(
+            &local,
+            "POST",
+            "/api/roots/init",
+            None,
+            json!({ "path": path }),
+        )
+        .await;
+        assert_eq!(status, 200, "{made}");
+        assert_eq!(made["root"], path);
+        let (status, again) = call(
+            &local,
+            "POST",
+            "/api/roots/init",
+            None,
+            json!({ "path": path }),
+        )
+        .await;
+        assert_eq!(status, 409, "{again}");
+        let (_, seen) = call(&local, "GET", &uri, None, null.clone()).await;
+        assert_eq!(
+            (seen["kind"].as_str(), seen["projj"].as_bool()),
+            (Some("root"), Some(true))
+        );
+
+        let (status, root) = call(&local, "GET", "/api/root", Some(&fresh), null.clone()).await;
+        assert_eq!(status, 200, "{root}");
+        assert_eq!(
+            (root["name"].as_str(), root["projj"].as_bool()),
+            (Some("fresh root"), Some(true))
+        );
+        let (status, review) = call(
+            &local,
+            "GET",
+            "/api/review/status",
+            Some(&fresh),
+            null.clone(),
+        )
+        .await;
+        assert_eq!(status, 200, "{review}");
+        // Only the top of a repository is a root.
+        std::fs::create_dir_all(fresh.join("track/inner")).unwrap();
+        let (status, err) = call(
+            &local,
+            "GET",
+            "/api/root",
+            Some(&fresh.join("track/inner")),
+            null.clone(),
+        )
+        .await;
+        assert_eq!(status, 404);
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap()
+                .contains("the root around it is")
+        );
+
+        // Opened roots come first in a search, with nothing typed.
+        let (_, found) = call(&local, "GET", "/api/roots?q=", None, null.clone()).await;
+        assert_eq!(found["hits"][0]["path"], path);
+        assert!(found["hits"][0]["opened"].is_i64());
+        let (_, found) = call(
+            &local,
+            "GET",
+            "/api/roots?q=nothing+like+it",
+            None,
+            null.clone(),
+        )
+        .await;
+        assert_eq!(found["hits"], json!([]));
+        let (status, _) = call(
+            &local,
+            "DELETE",
+            &format!("/api/roots/recent?{}", &uri[uri.find('?').unwrap() + 1..]),
+            None,
+            null.clone(),
+        )
+        .await;
+        assert_eq!(status, 200);
+
+        // A typed path is completed, and what it names is described.
+        let typed = format!(
+            "/api/roots?q={}",
+            percent_encoding::utf8_percent_encode(
+                &format!("{}/fr", base.display()),
+                percent_encoding::NON_ALPHANUMERIC
+            )
+        );
+        let (_, found) = call(&local, "GET", &typed, None, null.clone()).await;
+        assert_eq!(found["hits"][0]["path"], path);
+        assert_eq!(found["hits"][0]["kind"], "projj");
+        assert_eq!(found["typed"]["kind"], "missing");
+
+        // There is no chooser to show here.
+        let (status, _) = call(&local, "POST", "/api/roots/choose", None, json!({})).await;
+        assert_eq!(status, 404);
     }
 }
