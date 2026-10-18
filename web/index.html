@@ -36,6 +36,7 @@
         <option value="100000">Whole file</option>
       </select>
     </label>
+    <button type="button" id="guide-toggle" class="review-only" aria-pressed="false" aria-controls="guide" title="Talk the changes through with Codex">jjent</button>
     <button type="button" id="editor-toggle" class="review-only" aria-pressed="false" title="Show or hide the editor">Editor</button>
     <button type="button" id="refresh" class="review-only" title="Reload from disk">Reload</button>
     <button type="button" id="theme" title="Switch between light and dark">Theme</button>
@@ -49,6 +50,8 @@
   <a class="menu-item" id="menu-choose" href="?roots">Choose a projj</a>
 </nav>
 
+<div class="workbench">
+<div class="desk">
 <main id="roots" class="view" hidden>
   <div class="roots-sheet">
     <h1>Open a root</h1>
@@ -133,6 +136,33 @@
     </div>
   </div>
 </section>
+</div>
+
+<aside id="guide" aria-label="jjent" hidden>
+  <header>
+    <h2>jjent</h2>
+    <span id="guide-state" role="status"></span>
+    <select id="guide-effort" aria-label="How long Codex thinks" title="How long Codex thinks before it answers">
+      <option value="">Usual thinking</option>
+      <option value="low">Quick</option>
+      <option value="medium">Balanced</option>
+      <option value="high">Thorough</option>
+    </select>
+    <button type="button" id="guide-reset" class="quiet" title="Start the conversation over">New</button>
+    <button type="button" id="guide-close" title="Hide jjent. The conversation is kept.">Hide</button>
+  </header>
+  <div id="guide-log"></div>
+  <form id="guide-form">
+    <p id="guide-context"></p>
+    <textarea id="guide-input" rows="3" spellcheck="true" aria-label="Message to jjent" placeholder="Ask about the changes, or anything in this root"></textarea>
+    <div class="guide-actions">
+      <span class="guide-hint"><kbd>Enter</kbd> sends, <kbd>Shift</kbd> <kbd>Enter</kbd> for a new line</span>
+      <button type="button" id="guide-stop" hidden>Stop</button>
+      <button type="submit" id="guide-send" class="mark">Send</button>
+    </div>
+  </form>
+</aside>
+</div>
 
 <dialog id="merge" aria-labelledby="merge-title">
   <header>
@@ -197,6 +227,7 @@
     <dt><kbd>t</kbd></dt><dd>Switch between To review and Reviewed</dd>
     <dt><kbd>1</kbd> <kbd>2</kbd></dt><dd>Review, History</dd>
     <dt><kbd>/</kbd></dt><dd>Edit the revset (History)</dd>
+    <dt><kbd>g</kbd></dt><dd>Show jjent and ask it something</dd>
   </dl>
   <p>Click a changed line's number to select it, or to deselect it. Shift-click does the same to every line in between. Selected lines can be marked on their own.</p>
   <p>Select any text in a diff to edit the file at that spot. The editor opens below the diff, so both stay in view; drag its top edge to resize it.</p>

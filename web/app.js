@@ -642,6 +642,7 @@ async function loadSection(section) {
       section.counts.replaceChildren(entry.directory ? "" : tally(stat.added, stat.removed));
       section.body.classList.remove("pending");
       section.body.replaceChildren(...content);
+      markSection(section);
     });
     section.loaded = true;
   } finally {
@@ -756,15 +757,16 @@ async function loadStatus() {
 }
 
 function switchSide(side) {
-  if (side === state.side) return;
+  if (side === state.side) return Promise.resolve();
   state.side = side;
   for (const section of state.sections.values()) lazy.unobserve(section.el);
   state.sections = new Map();
   state.focused = null;
   renderSidebar();
   releasePin();
-  syncStream().catch(fail);
+  const synced = syncStream().catch(fail);
   $("#stream").scrollTop = 0;
+  return synced;
 }
 
 function hunkElements() {
@@ -1066,7 +1068,8 @@ function createBuffer(file, content = file.content) {
   // A colored copy of the text sits behind the text area, which then shows
   // only its caret and selection. See paintColors.
   const colors = h("pre", null);
-  const layer = h("div", { class: "editor-layer" }, h("div", { class: "editor-colors", "aria-hidden": "true" }, colors), text);
+  const marks = h("div", { class: "editor-marks", "aria-hidden": "true" });
+  const layer = h("div", { class: "editor-layer" }, marks, h("div", { class: "editor-colors", "aria-hidden": "true" }, colors), text);
   const buffer = {
     path: file.path,
     eol: file.eol,
@@ -1076,6 +1079,8 @@ function createBuffer(file, content = file.content) {
     text,
     layer,
     colors,
+    // The guide's highlights. See paintEditorMarks.
+    marks,
     indent: detectIndent(file.content),
     // How the edits relate to a newer file on disk, until a person has
     // looked at it and chosen. See checkAgainstDisk.
@@ -1106,6 +1111,7 @@ function createBuffer(file, content = file.content) {
   text.addEventListener("scroll", () => {
     if (buffer === activeBuffer()) $("#editor-gutter").scrollTop = text.scrollTop;
     paintColors(buffer);
+    paintEditorMarks(buffer);
   });
   text.addEventListener("keydown", (event) => {
     const plain = !event.metaKey && !event.ctrlKey && !event.altKey;
@@ -1271,12 +1277,14 @@ function setEditorHeight(pixels) {
 }
 
 /**
- * Gives `panel` a handle on its right edge that drags, or moves with the
- * arrow keys, to change its width, kept as the setting `key`. Double-click
- * puts it back to the stock width. style.css reads the width from the CSS
- * variable `--{key}` and keeps room beside the panel however it is set.
+ * Gives `panel` a handle on its right edge (or its left, with `fromLeft`)
+ * that drags, or moves with the arrow keys, to change its width, kept as the
+ * setting `key`. Double-click puts it back to the stock width. style.css
+ * reads the width from the CSS variable `--{key}` and keeps room beside the
+ * panel however it is set.
  */
-function widthHandle(panel, key, label, around = (change) => change()) {
+function widthHandle(panel, key, label, around = (change) => change(), fromLeft = false) {
+  const outward = fromLeft ? -1 : 1;
   const root = document.documentElement;
   const set = (pixels) =>
     around(() => {
@@ -1289,13 +1297,13 @@ function widthHandle(panel, key, label, around = (change) => change()) {
     set(width);
     if (width !== setting(key)) saveSetting(key, width);
   };
-  const handle = h("div", { class: "width-handle", role: "separator", "aria-orientation": "vertical", "aria-label": label, tabindex: "0", title: "Drag to resize; double-click for the usual width" });
+  const handle = h("div", { class: fromLeft ? "width-handle left" : "width-handle", role: "separator", "aria-orientation": "vertical", "aria-label": label, tabindex: "0", title: "Drag to resize; double-click for the usual width" });
   handle.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
     event.preventDefault();
     handle.setPointerCapture(event.pointerId);
     const from = { x: event.clientX, width: panel.getBoundingClientRect().width };
-    const drag = (move) => set(from.width + move.clientX - from.x);
+    const drag = (move) => set(from.width + outward * (move.clientX - from.x));
     handle.addEventListener("pointermove", drag);
     handle.addEventListener(
       "lostpointercapture",
@@ -1310,7 +1318,7 @@ function widthHandle(panel, key, label, around = (change) => change()) {
     const step = { ArrowLeft: -16, ArrowRight: 16 }[event.key];
     if (!step) return;
     event.preventDefault();
-    set(panel.getBoundingClientRect().width + step);
+    set(panel.getBoundingClientRect().width + outward * step);
     save();
   });
   handle.addEventListener("dblclick", () => {
@@ -2881,6 +2889,809 @@ function showFileHistory(workspace, path) {
   setView("history");
 }
 
+// ---------------------------------------------------------------- guide
+//
+// The guide is a conversation with Codex, which the server runs, in a drawer
+// on the right. Codex reads the root through the server, and acts on this
+// page through it too: when it asks to show or highlight something, the
+// server passes that on to the page that sent the latest message, which does
+// it and says what it did (answerCall). The page hears about that, and about
+// replies as they are written, by asking the server what has happened since
+// it last asked (guidePoll).
+
+const guide = {
+  // Names this page to the server, which points on the page that last spoke.
+  page: [...crypto.getRandomValues(new Uint8Array(8))].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+  loaded: false,
+  problem: null,
+  seq: 0,
+  running: false,
+  entries: [],
+  polling: false,
+  // What the guide is pointing at: `{ path, side, line, end, hunk, note }`.
+  marks: [],
+  // The tour being stepped through: `{ id, step }`.
+  tour: null,
+  // What each entry was last drawn as, so that only what changed is redrawn.
+  nodes: new Map(),
+  // Requests from Codex are carried out one at a time, in order.
+  calls: Promise.resolve(),
+  // What the person last selected in a diff, kept while they write about it.
+  selection: null,
+  frame: 0,
+  drawnCount: 0,
+};
+
+const guideOpen = () => !$("#guide").hidden;
+
+/** Ways in for someone who has not said anything yet. */
+const GUIDE_STARTS = [
+  ["Walk me through the changes", "Walk me through the unreviewed changes, in the order that makes them easiest to understand."],
+  ["What deserves the most care?", "Which of the unreviewed changes deserve the most careful review, and why?"],
+  ["Explain what is on my screen", "Explain what I am looking at."],
+];
+
+function showGuide(open, focus = open) {
+  // The stream wraps differently once it is narrower; keep the reader's place.
+  keepPlace(() => ($("#guide").hidden = !open));
+  $("#guide-toggle").setAttribute("aria-pressed", open);
+  if (open !== setting("guide-open", false)) saveSetting("guide-open", open);
+  if (!open) return;
+  if (!guide.loaded) loadGuide().catch(fail);
+  else guidePoll();
+  describeContext();
+  if (focus) $("#guide-input").focus();
+}
+
+async function loadGuide() {
+  const got = await api("/api/guide", { page: guide.page });
+  guide.loaded = true;
+  guide.problem = got.problem;
+  takeSnapshot(got);
+  guidePoll();
+}
+
+function takeSnapshot(got) {
+  guide.seq = got.seq;
+  guide.running = got.running;
+  guide.entries = got.entries;
+  if (guide.tour && !guide.entries.some((entry) => entry.id === guide.tour.id)) guide.tour = null;
+  drawGuide();
+}
+
+/** Asks for what happened, again and again, while the conversation is on show or under way. */
+async function guidePoll() {
+  if (guide.polling) return;
+  guide.polling = true;
+  const wanted = () =>
+    guide.loaded && !guide.problem && state.rootPath && state.view !== "roots" && (guide.running || (guideOpen() && document.visibilityState === "visible"));
+  try {
+    while (wanted()) {
+      let got;
+      try {
+        got = await api("/api/guide/events", { page: guide.page, after: guide.seq });
+      } catch {
+        // The server may be restarting; it answers again soon enough.
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        continue;
+      }
+      if (got.resync) takeSnapshot(got);
+      else for (const event of got.events) guideEvent(event);
+      guide.seq = got.seq;
+      guide.running = got.running;
+      drawGuide();
+    }
+  } finally {
+    guide.polling = false;
+  }
+}
+
+function guideEvent(event) {
+  if (event.type === "entry") {
+    const at = guide.entries.findIndex((entry) => entry.id === event.entry.id);
+    if (at < 0) guide.entries.push(event.entry);
+    else guide.entries[at] = event.entry;
+    // A new tour starts at its first step, which Codex goes on to explain.
+    if (event.entry.kind === "tour" && at < 0) guide.tour = { id: event.entry.id, step: 0 };
+  } else if (event.type === "delta") {
+    const entry = guide.entries.find((candidate) => candidate.id === event.id);
+    if (entry) entry.text = (entry.text || "") + event.text;
+  } else if (event.type === "status") {
+    guide.running = event.running;
+  } else if (event.type === "reset") {
+    guide.entries = [];
+    guide.tour = null;
+    setMarks([]);
+  } else if (event.type === "call" && event.page === guide.page) {
+    guide.calls = guide.calls.then(() => answerCall(event));
+  }
+}
+
+/** Does what Codex asked of the page, and tells the server how it went. */
+async function answerCall({ call, tool, args }) {
+  let answer;
+  try {
+    answer = { call, result: await GUIDE_TOOLS[tool](args || {}) };
+  } catch (err) {
+    answer = { call, error: err.message || String(err) };
+  }
+  await post("/api/guide/answer", answer).catch(() => {});
+}
+
+const GUIDE_TOOLS = {
+  view: async () => describePage(),
+  show: async (args) => showPlace(await placeOf(args), args.in === "editor"),
+  highlight: (args) => highlight(args),
+  clear_highlights: async (args) => {
+    const path = args.path ? await resolvePath(args.path) : null;
+    const before = guide.marks.length;
+    setMarks(path ? guide.marks.filter((mark) => mark.path !== path) : []);
+    return { cleared: before - guide.marks.length };
+  },
+};
+
+async function sendGuide(text) {
+  text = text.trim();
+  if (!text) return;
+  if (!guide.loaded) await loadGuide();
+  if (guide.problem) return;
+  $("#guide-input").value = "";
+  try {
+    await post("/api/guide/send", { page: guide.page, text, context: describePage(), effort: setting("guide-effort", "") || null });
+  } catch (err) {
+    // The server put what went wrong in the conversation.
+    if (!err.status || err.status >= 500) fail(err);
+  }
+  guidePoll();
+}
+
+// ---- where things are
+
+/**
+ * The root-relative path that `path` names. Codex sometimes gives a path
+ * within a workspace rather than within the root; that is fine as long as
+ * only one file ends that way.
+ */
+async function resolvePath(path) {
+  path = String(path || "").trim().replace(/^\.?\/+/, "");
+  if (!path) throw new Error("a path is needed");
+  const changed = (state.status?.entries || []).map((entry) => entry.path);
+  if (changed.includes(path) || editor.files.includes(path)) return path;
+  if (!editor.files.length) await refreshFiles();
+  if (editor.files.includes(path)) return path;
+  const matches = [...new Set([...changed, ...editor.files])].filter((candidate) => candidate.endsWith(`/${path}`));
+  if (matches.length === 1) return matches[0];
+  if (matches.length) throw new Error(`${path} could be any of ${matches.slice(0, 6).join(", ")}; give the path from the root`);
+  throw new Error(`there is no file ${path} in this root`);
+}
+
+/** A place, as Codex or a link gives it, made definite. */
+async function placeOf(args) {
+  const whole = (value) => (Number.isInteger(value) && value > 0 ? value : null);
+  const line = whole(args.line);
+  const end = line ? Math.max(line, whole(args.end) || line) : null;
+  return {
+    path: await resolvePath(args.path),
+    side: args.side === "old" ? "old" : "new",
+    line,
+    end,
+    hunk: typeof args.hunk === "string" && args.hunk ? args.hunk : null,
+  };
+}
+
+/** Which review side shows the file: the one on screen if it can. */
+function reviewSideOf(path) {
+  const has = (side) => reviewEntries(side).some((entry) => entry.path === path && !entry.directory);
+  if (has(state.side)) return state.side;
+  const other = state.side === "staged" ? "unstaged" : "staged";
+  return has(other) ? other : null;
+}
+
+/** The file's section in the stream, its diff loaded. */
+async function sectionFor(path) {
+  if (!state.sections.has(path)) {
+    // Its workspace may be folded away.
+    const entry = reviewEntries().find((candidate) => candidate.path === path);
+    if (entry && state.folded.delete(entry.workspace || "")) {
+      renderSidebar();
+      await syncStream();
+    }
+  }
+  const section = state.sections.get(path);
+  if (!section) return null;
+  section.el.classList.remove("collapsed");
+  while (section.loading) await new Promise((resolve) => setTimeout(resolve, 30));
+  if (!section.loaded) await loadSection(section);
+  return section;
+}
+
+/**
+ * The diff rows of a place: the lines asked for, along with what is
+ * interleaved with them (the lines they replaced, the other column), or a
+ * whole hunk. Lines are looked for in the hunk asked for, if it is shown.
+ */
+function rowsFor(section, place) {
+  const hunks = [...section.body.querySelectorAll(".hunk")];
+  const named = place.hunk && hunks.filter((el) => el.hunk.id === place.hunk);
+  const rows = [];
+  for (const el of named?.length ? named : hunks) {
+    const all = [...el.querySelectorAll(".line")];
+    if (!place.line) {
+      if (el.hunk.id === place.hunk) rows.push(...all);
+      continue;
+    }
+    const number = (row) => {
+      const line = el.hunk.lines[row.dataset.index];
+      return place.side === "old" ? line.old : line.new;
+    };
+    const indexes = all.filter((row) => number(row) >= place.line && number(row) <= place.end).map((row) => Number(row.dataset.index));
+    if (!indexes.length) continue;
+    const [low, high] = [Math.min(...indexes), Math.max(...indexes)];
+    rows.push(...all.filter((row) => row.dataset.index >= low && row.dataset.index <= high));
+  }
+  return rows;
+}
+
+/** Scrolls the stream so that the rows sit a little above its middle. */
+function bringIntoView(rows) {
+  const stream = $("#stream");
+  const box = stream.getBoundingClientRect();
+  const top = rows[0].getBoundingClientRect().top;
+  const height = rows[rows.length - 1].getBoundingClientRect().bottom - top;
+  // Room under the sticky file header.
+  const room = box.height - 48;
+  const above = height < room ? (room - height) / 3 : 0;
+  releasePin();
+  scrollStreamTo(stream.scrollTop + top - box.top - 48 - above);
+}
+
+/** Line numbers of the first and last rows, on the side asked for. */
+function rowSpan(rows, side) {
+  const numbers = rows
+    .map((row) => row.closest(".hunk").hunk.lines[row.dataset.index][side === "old" ? "old" : "new"])
+    .filter((number) => number != null);
+  return numbers.length ? [Math.min(...numbers), Math.max(...numbers)] : null;
+}
+
+/**
+ * Shows a place: in its diff, on whichever side of the review has it, or in
+ * the editor if it has no diff (or `inEditor`).
+ */
+async function showPlace(place, inEditor = false) {
+  if (state.view !== "review") setView("review");
+  if (!state.status) await loadStatus();
+  const side = inEditor ? null : reviewSideOf(place.path);
+  if (side && side !== state.side) {
+    await switchSide(side);
+    writeHash();
+  }
+  const section = side && (await sectionFor(place.path));
+  if (!section) return showInEditor(place);
+  const rows = rowsFor(section, place);
+  if ((place.line || place.hunk) && !rows.length) {
+    if (place.hunk && !place.line) {
+      throw new Error(`${place.path} has no hunk ${place.hunk} on the page now; it may have been reviewed or changed. Give lines instead.`);
+    }
+    // Lines outside every hunk: the editor has the whole file.
+    if (place.side === "new" && onDisk(section.entry)) return showInEditor(place);
+  }
+  if (rows.length) {
+    focusHunk(rows[0].closest(".hunk"), false);
+    bringIntoView(rows);
+  } else {
+    scrollToKey(place.path);
+  }
+  return {
+    shown: "diff",
+    path: place.path,
+    review: side === "staged" ? "reviewed" : "unreviewed",
+    lines: rows.length ? rowSpan(rows, place.side) : null,
+  };
+}
+
+/** Opens a file in the editor at a place, leaving the focus where it is. */
+async function showInEditor(place) {
+  if (place.side === "old") throw new Error(`the old lines of ${place.path} are only in its diff, and it has no diff on the page`);
+  showEditor();
+  if (!editor.buffers.has(place.path)) {
+    const file = await api("/api/file", { path: place.path });
+    if (!editor.buffers.has(place.path)) createBuffer(file);
+  }
+  activate(place.path);
+  const buffer = editor.buffers.get(place.path);
+  const { text } = buffer;
+  const count = text.value.split("\n").length;
+  const span = editorSpan(buffer, place);
+  const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+  text.scrollTop = span ? Math.max(0, (span[0] - 1) * lineHeight - text.clientHeight / 3) : 0;
+  paintEditorMarks(buffer);
+  return { shown: "editor", path: place.path, lines: span, of: count };
+}
+
+/** The lines of a place in an open file: those asked for, or those of the hunk named. */
+function editorSpan(buffer, place) {
+  const count = buffer.text.value.split("\n").length;
+  if (place.line) return [Math.min(place.line, count), Math.min(place.end, count)];
+  const hunk = place.hunk && [...(state.sections.get(place.path)?.body.querySelectorAll(".hunk") || [])].find((el) => el.hunk.id === place.hunk)?.hunk;
+  if (!hunk || !hunk.new_count) return null;
+  return [hunk.new_start, Math.min(count, hunk.new_start + hunk.new_count - 1)];
+}
+
+// ---- pointing
+
+async function highlight(args) {
+  const place = await placeOf(args);
+  const mark = { ...place, note: typeof args.note === "string" ? args.note.trim().slice(0, 400) : "" };
+  setMarks(args.add ? [...guide.marks, mark] : [mark]);
+  if (args.scroll === false) return { highlighted: place.path };
+  const shown = await showPlace(place);
+  paintMarks();
+  return { highlighted: true, ...shown };
+}
+
+function setMarks(marks) {
+  guide.marks = marks;
+  paintMarks();
+}
+
+/** Draws the guide's highlights wherever they are on show. */
+function paintMarks() {
+  keepPlace(() => {
+    for (const section of state.sections.values()) if (section.loaded) markSection(section);
+  });
+  for (const buffer of editor.buffers.values()) paintEditorMarks(buffer);
+}
+
+function markSection(section) {
+  section.el.classList.remove("guided");
+  for (const el of section.el.querySelectorAll(".line.guided")) el.classList.remove("guided");
+  for (const el of section.el.querySelectorAll(".guide-note")) el.remove();
+  for (const mark of guide.marks) {
+    if (mark.path !== section.path) continue;
+    if (!mark.line && !mark.hunk) {
+      section.el.classList.add("guided");
+      continue;
+    }
+    const rows = rowsFor(section, mark);
+    for (const row of rows) row.classList.add("guided");
+    if (!mark.note || !rows.length) continue;
+    const last = rows[rows.length - 1];
+    const split = last.closest(".pair");
+    (split || last).after(h("p", { class: split ? "guide-note split" : "guide-note" }, mark.note));
+  }
+}
+
+/** Bands behind the editor's text for the highlights in its file, where it is scrolled to. */
+function paintEditorMarks(buffer) {
+  const marks = guide.marks.filter((mark) => mark.path === buffer.path && mark.side === "new");
+  if (!marks.length && !buffer.marks.firstChild) return;
+  const { text } = buffer;
+  const style = getComputedStyle(text);
+  const lineHeight = parseFloat(style.lineHeight);
+  const top = parseFloat(style.paddingTop) - text.scrollTop;
+  buffer.marks.replaceChildren(
+    ...marks.map((mark) => {
+      const span = editorSpan(buffer, mark);
+      if (!span) return null;
+      const placed = `top:${top + (span[0] - 1) * lineHeight}px;height:${(span[1] - span[0] + 1) * lineHeight}px`;
+      return h("div", { class: "editor-mark", style: placed }, mark.note && h("span", { title: mark.note }, mark.note));
+    }),
+  );
+}
+
+// ---- what the page shows, for Codex
+
+const clip = (text, most = 4000) => (text.length > most ? `${text.slice(0, most)}…` : text);
+
+/** What the person selected in a diff: which file, which lines, what text. */
+function describeSelection(selection) {
+  const range = selection.getRangeAt(0);
+  const start = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement;
+  const card = start?.closest("#stream .file");
+  if (!card) return null;
+  const rows = [...card.querySelectorAll(".line")].filter((row) => range.intersectsNode(row));
+  return {
+    path: card.dataset.key,
+    lines: rows.length ? rowSpan(rows, "new") || rowSpan(rows, "old") : null,
+    text: clip(selection.toString()),
+  };
+}
+
+function describeEditor(buffer) {
+  const { text } = buffer;
+  const lineHeight = parseFloat(getComputedStyle(text).lineHeight);
+  const count = text.value.split("\n").length;
+  const first = Math.floor(text.scrollTop / lineHeight) + 1;
+  const described = {
+    file: buffer.path,
+    lines_on_screen: [Math.min(first, count), Math.min(count, first + Math.floor(text.clientHeight / lineHeight))],
+    unsaved_edits: isDirty(buffer),
+  };
+  if (text.selectionStart !== text.selectionEnd) {
+    const from = text.value.slice(0, text.selectionStart).split("\n").length;
+    const chosen = text.value.slice(text.selectionStart, text.selectionEnd);
+    described.selected = { lines: [from, from + chosen.split("\n").length - 1], text: clip(chosen) };
+  }
+  return described;
+}
+
+/** What is on the page: what the guide's view tool answers, and what goes with each message. */
+function describePage() {
+  const described = { view: state.view, review: state.side === "staged" ? "reviewed" : "unreviewed" };
+  if (state.view === "history") {
+    described.history = { workspace: state.ws, revset: state.revset || null, commit: state.selected || null, file: state.filePath || null };
+  } else {
+    const box = $("#stream").getBoundingClientRect();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.bottom > box.top && rect.top < box.bottom;
+    };
+    described.on_screen = [...document.querySelectorAll("#stream .file")].filter(visible).map((el) => ({
+      path: el.dataset.key,
+      hunks: [...el.querySelectorAll(".hunk")].filter(visible).map(({ hunk }) => ({ id: hunk.id, new: [hunk.new_start, hunk.new_count], old: [hunk.old_start, hunk.old_count] })),
+    }));
+    if (state.focused?.isConnected) described.focused = { path: state.focused.closest(".file").dataset.key, hunk: state.focused.hunk.id };
+  }
+  if (guide.selection) described.selected_in_diff = guide.selection;
+  if (editorOpen()) described.editor = activeBuffer() ? describeEditor(activeBuffer()) : { file: null };
+  if (guide.marks.length) described.highlights = guide.marks;
+  const tour = guide.tour && guide.entries.find((entry) => entry.id === guide.tour.id);
+  if (tour) described.tour = { title: tour.title, step: guide.tour.step + 1, of: tour.steps.length, step_title: tour.steps[guide.tour.step]?.title };
+  return described;
+}
+
+/** Says, under the message box, what goes with a message. */
+function describeContext() {
+  if (!guideOpen()) return;
+  const name = (path) => splitPath(path)[1];
+  const buffer = editorOpen() && activeBuffer();
+  const selected = buffer && buffer.text.selectionStart !== buffer.text.selectionEnd;
+  const tour = guide.tour && guide.entries.find((entry) => entry.id === guide.tour.id);
+  const parts = [
+    guide.selection ? `your selection in ${name(guide.selection.path)}` : selected ? `your selection in ${name(buffer.path)}` : "what is on screen",
+    tour && `step ${guide.tour.step + 1} of the tour`,
+  ].filter(Boolean);
+  $("#guide-context").textContent = `Sent along: ${parts.join(", ")}`;
+}
+
+// ---- the drawer
+
+function drawGuide() {
+  if (guide.frame) return;
+  guide.frame = requestAnimationFrame(() => {
+    guide.frame = 0;
+    renderGuide();
+  });
+}
+
+/** A short form of a path, for saying what was done to it. */
+const shortPlace = (args = {}) => {
+  const name = args.path ? splitPath(String(args.path))[1] : "";
+  if (!args.line) return name;
+  return `${name}:${args.line}${args.end && args.end !== args.line ? `-${args.end}` : ""}`;
+};
+
+function actLabel(entry) {
+  const args = entry.args || {};
+  switch (entry.tool) {
+    case "changes": return args.side === "reviewed" ? "Listed the reviewed changes" : "Listed the changes";
+    case "diff": return `Read the diff of ${shortPlace(args)}`;
+    case "read": return `Read ${shortPlace(args)}${args.from ? ` from line ${args.from}` : ""}`;
+    case "files": return args.match ? `Looked for files matching “${args.match}”` : "Listed the files";
+    case "workspaces": return "Listed the workspaces";
+    case "jj_log": return `Read the jj history of ${args.workspace || "a workspace"}`;
+    case "jj_diff": return `Read jj change ${String(args.to || "").slice(0, 12)}`;
+    case "view": return "Looked at your screen";
+    case "show": return `Showed ${shortPlace(args)}`;
+    case "highlight": return `Highlighted ${shortPlace(args)}`;
+    case "clear_highlights": return "Cleared the highlights";
+    case "tour": return "Planned a tour";
+    default: return String(entry.tool || "Used a tool");
+  }
+}
+
+function actRow(entry) {
+  const running = entry.status === "inProgress";
+  const failed = entry.ok === false || entry.status === "failed" || entry.status === "declined" || (entry.exit != null && entry.exit !== 0);
+  const what =
+    entry.kind === "command"
+      ? h("code", null, String(entry.command || "").replace(/^\S+\s+-l?c\s+'([\s\S]*)'$/, "$1"))
+      : ["show", "highlight"].includes(entry.tool) && entry.args?.path
+        ? h("button", { type: "button", class: "g-redo", title: "Show it again", onclick: () => highlight({ ...entry.args, add: false }).catch(fail) }, actLabel(entry))
+        : actLabel(entry);
+  return h(
+    "div",
+    { class: `g-act${running ? " running" : ""}${failed ? " failed" : ""}` },
+    h("span", { class: "g-what" }, entry.kind === "command" && "Ran ", what),
+  );
+}
+
+/** The steps Codex took between messages, folded away once there are a few. */
+function actsNode(entries) {
+  const id = `acts:${entries[0].id}`;
+  const key = JSON.stringify(entries.map((entry) => [entry.id, entry.status, entry.ok, entry.exit]));
+  const cached = guide.nodes.get(id);
+  if (cached?.key === key) return cached.node;
+  const folded = entries.length > 2;
+  // A group that folds stays one element, so that it stays open if opened.
+  let node = cached?.node;
+  if (!node || (node.tagName === "DETAILS") !== folded) node = h(folded ? "details" : "div", { class: "g-acts" });
+  const busy = entries.some((entry) => entry.status === "inProgress");
+  node.replaceChildren(...[folded && h("summary", null, `${entries.length} steps${busy ? " …" : ""}`), ...entries.map(actRow)].filter(Boolean));
+  guide.nodes.set(id, { key, node });
+  return node;
+}
+
+function tourNode(entry) {
+  const current = guide.tour?.id === entry.id ? guide.tour.step : -1;
+  const count = entry.steps.length;
+  const step = (index) => () => goToStep(entry, index).catch(fail);
+  return h(
+    "section",
+    { class: "g-tour", "aria-label": entry.title || "Walkthrough" },
+    h(
+      "header",
+      null,
+      h("h3", null, entry.title || "Walkthrough"),
+      h("span", null, current < 0 ? `${count} steps` : `${current + 1} of ${count}`),
+      h("button", { type: "button", disabled: current <= 0, onclick: step(current - 1) }, "Back"),
+      h("button", { type: "button", class: current < 0 ? "mark" : null, disabled: current >= count - 1, onclick: step(current + 1) }, current < 0 ? "Start" : "Next"),
+    ),
+    h(
+      "ol",
+      null,
+      entry.steps.map((item, index) =>
+        h(
+          "li",
+          { class: index === current ? "g-step current" : "g-step" },
+          h("button", { type: "button", "aria-current": index === current ? "step" : null, onclick: step(index) }, h("strong", null, item.title), item.explain && h("span", null, item.explain)),
+        ),
+      ),
+    ),
+  );
+}
+
+/** Goes to a step of a tour: highlights its places and shows the first. */
+async function goToStep(entry, index) {
+  const step = entry.steps[index];
+  if (!step) return;
+  guide.tour = { id: entry.id, step: index };
+  drawGuide();
+  describeContext();
+  const places = [];
+  for (const place of step.places || []) {
+    try {
+      places.push(await placeOf(place));
+    } catch {
+      // A place that is gone takes nothing else with it.
+    }
+  }
+  setMarks(places.map((place, at) => ({ ...place, note: at === 0 ? step.title : "" })));
+  if (places.length) await showPlace(places[0]);
+  paintMarks();
+}
+
+function entryNode(entry) {
+  const key = JSON.stringify([entry.text, entry.done, entry.kind === "tour" && guide.tour?.id === entry.id ? guide.tour.step : -1]);
+  const cached = guide.nodes.get(entry.id);
+  if (cached?.key === key) return cached.node;
+  let node;
+  if (entry.kind === "user") {
+    node = h("div", { class: "g-user" }, entry.text);
+  } else if (entry.kind === "agent") {
+    node = cached?.node || h("div");
+    node.className = `g-agent${entry.phase === "commentary" ? " commentary" : ""}${entry.done ? "" : " writing"}`;
+    node.replaceChildren(...renderMarkdown(entry.text || ""));
+  } else if (entry.kind === "tour") {
+    node = tourNode(entry);
+  } else {
+    node = h("div", { class: entry.kind === "error" ? "g-error" : "g-note" }, entry.text);
+  }
+  guide.nodes.set(entry.id, { key, node });
+  return node;
+}
+
+function renderGuide() {
+  const log = $("#guide-log");
+  const atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 48;
+  $("#guide-state").textContent = guide.problem ? "Not available" : guide.running ? "Codex is working…" : guide.loaded ? "Codex, reading only" : "";
+  $("#guide-stop").hidden = !guide.running;
+  $("#guide-send").disabled = Boolean(guide.problem);
+  $("#guide-input").disabled = Boolean(guide.problem);
+  const nodes = [];
+  if (guide.problem) {
+    nodes.push(
+      h(
+        "div",
+        { class: "g-problem" },
+        h("p", null, guide.problem),
+        h("button", { type: "button", onclick: () => loadGuide().catch(fail) }, "Try again"),
+      ),
+    );
+  } else if (!guide.entries.length && guide.loaded) {
+    nodes.push(
+      h(
+        "div",
+        { class: "g-welcome" },
+        h("h3", null, "Talk the changes through"),
+        h("p", null, "Codex reads this root and can scroll and highlight the page as it explains. It cannot change anything."),
+        h("div", { class: "g-starts" }, GUIDE_STARTS.map(([label, text]) => h("button", { type: "button", onclick: () => sendGuide(text) }, label))),
+      ),
+    );
+  }
+  let acts = [];
+  const endActs = () => {
+    if (acts.length) nodes.push(actsNode(acts));
+    acts = [];
+  };
+  for (const entry of guide.problem ? [] : guide.entries) {
+    if (entry.kind === "tool" || entry.kind === "command") {
+      acts.push(entry);
+      continue;
+    }
+    endActs();
+    nodes.push(entryNode(entry));
+  }
+  endActs();
+  const current = [...log.children];
+  if (nodes.length !== current.length || nodes.some((node, i) => node !== current[i])) log.replaceChildren(...nodes);
+  // Follow the conversation while reading its end, and after saying something.
+  const said = guide.entries.at(-1)?.kind === "user" && guide.entries.length !== guide.drawnCount;
+  guide.drawnCount = guide.entries.length;
+  if (atEnd || said) log.scrollTop = log.scrollHeight;
+}
+
+// ---- replies, from Markdown
+
+/** A place in the root that a link or a code span names: `path`, `path:12`, `path:12-20` or `path#L12-L20`. */
+function parsePlace(target) {
+  let text;
+  try {
+    text = decodeURIComponent(target);
+  } catch {
+    text = target;
+  }
+  const match = text.replace(/^file:\/\//, "").match(/^([^\s:#]+?)(?::(\d+)(?:-(\d+))?|#L(\d+)(?:-L?(\d+))?)?$/);
+  if (!match || !/[./]/.test(match[1])) return null;
+  const line = Number(match[2] || match[4]) || undefined;
+  const end = Number(match[3] || match[5]) || line;
+  return { path: match[1], line, end };
+}
+
+function placeButton(label, place) {
+  const title = `Show ${place.path}${place.line ? `:${place.line}` : ""}`;
+  return h("button", { type: "button", class: "g-place", title, onclick: () => highlight(place).catch(fail) }, label);
+}
+
+/** Code, bold and links in a line; `places` false for a link's own label, which cannot hold another. */
+function inlineMarkdown(text, places = true) {
+  const nodes = [];
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s)<>]+)/g;
+  let at = 0;
+  for (const match of text.matchAll(pattern)) {
+    nodes.push(text.slice(at, match.index));
+    at = match.index + match[0].length;
+    const [, code, bold, label, target, bare] = match;
+    if (code != null) {
+      const place = places && /^[\w.@~+-]+(\/[\w.@~+-]+)*:\d+(-\d+)?$/.test(code) && parsePlace(code);
+      nodes.push(place ? placeButton(h("code", null, code), place) : h("code", null, code));
+    } else if (bold != null) {
+      nodes.push(h("strong", null, bold));
+    } else {
+      const url = target ?? bare;
+      // A label may have code in it, but not another link.
+      const shown = label == null ? url : inlineMarkdown(label, false);
+      const place = !/^[a-z][a-z0-9+.-]*:\/\//i.test(url) && parsePlace(url);
+      if (!places) nodes.push(...[shown].flat());
+      else if (place) nodes.push(placeButton(shown, place));
+      else if (/^https?:\/\//i.test(url)) nodes.push(h("a", { href: url, target: "_blank", rel: "noreferrer noopener" }, shown));
+      else nodes.push(...[shown].flat());
+    }
+  }
+  nodes.push(text.slice(at));
+  return nodes.filter((node) => node !== "");
+}
+
+/** Paragraphs, lists, headings and code blocks, as elements: never as HTML, whatever the text says. */
+function renderMarkdown(text) {
+  const blocks = [];
+  const lines = text.replace(/\r/g, "").split("\n");
+  let paragraph = [];
+  let list = null;
+  const flush = () => {
+    if (paragraph.length) blocks.push(h("p", null, inlineMarkdown(paragraph.join(" "))));
+    paragraph = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = line.match(/^\s*(```+|~~~+)/);
+    if (fence) {
+      flush();
+      list = null;
+      const body = [];
+      while (++i < lines.length && !lines[i].trim().startsWith(fence[1])) body.push(lines[i]);
+      blocks.push(h("pre", null, h("code", null, body.join("\n"))));
+      continue;
+    }
+    if (!line.trim()) {
+      flush();
+      list = null;
+      continue;
+    }
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) {
+      flush();
+      list = null;
+      blocks.push(h("h4", null, inlineMarkdown(heading[1])));
+      continue;
+    }
+    const item = line.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
+    if (item) {
+      flush();
+      const ordered = /\d/.test(item[1]);
+      if (!list || list.ordered !== ordered) {
+        const start = ordered && parseInt(item[1], 10) !== 1 ? { start: parseInt(item[1], 10) } : null;
+        list = { ordered, el: h(ordered ? "ol" : "ul", start) };
+        blocks.push(list.el);
+      }
+      list.el.append(h("li", null, inlineMarkdown(item[2])));
+      continue;
+    }
+    if (list && /^\s+\S/.test(line)) {
+      list.el.lastChild.append(" ", ...inlineMarkdown(line.trim()));
+      continue;
+    }
+    list = null;
+    paragraph.push(line.trim());
+  }
+  flush();
+  return blocks;
+}
+
+function bindGuide() {
+  widthHandle($("#guide"), "guide-width", "Resize jjent", keepPlace, true);
+  $("#guide-toggle").addEventListener("click", () => showGuide(!guideOpen()));
+  $("#guide-close").addEventListener("click", () => showGuide(false));
+  const input = $("#guide-input");
+  $("#guide-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    sendGuide(input.value).catch(fail);
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      sendGuide(input.value).catch(fail);
+    } else if (event.key === "Escape") {
+      $("#stream").focus({ preventScroll: true });
+    }
+  });
+  input.addEventListener("focus", describeContext);
+  $("#guide-stop").addEventListener("click", () => post("/api/guide/stop").catch(fail));
+  $("#guide-reset").addEventListener("click", async () => {
+    if (guide.entries.length && !confirm("Start the conversation over? Codex forgets what was said.")) return;
+    await post("/api/guide/reset").catch(fail);
+    setMarks([]);
+  });
+  const effort = $("#guide-effort");
+  effort.value = setting("guide-effort", "");
+  effort.addEventListener("change", () => saveSetting("guide-effort", effort.value || null));
+  // A selection in a diff is kept while the person writes about it, and
+  // dropped once they select nothing there.
+  let noting = 0;
+  document.addEventListener("selectionchange", () => {
+    if (noting) return;
+    noting = requestAnimationFrame(() => {
+      noting = 0;
+      const selection = getSelection();
+      if (!selection.anchorNode || !$("#stream").contains(selection.anchorNode)) return;
+      guide.selection = selection.isCollapsed ? null : describeSelection(selection);
+      describeContext();
+    });
+  });
+  document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && guidePoll());
+  addEventListener("pagehide", () => guide.loaded && post("/api/guide/leave", { page: guide.page }).catch(() => {}));
+}
+
 // ---------------------------------------------------------------- menu
 //
 // The projj button at the top left opens a panel for what is not about the
@@ -3616,6 +4427,7 @@ function bind() {
   const SCROLL_KEYS = new Set(["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", " "]);
   document.addEventListener("keydown", (event) => SCROLL_KEYS.has(event.key) && releasePin(), true);
   bindEditor();
+  bindGuide();
   document.addEventListener("keydown", onKey);
   document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && poll());
   setInterval(poll, 4000);
@@ -3643,6 +4455,7 @@ function onKey(event) {
     r: () => review && state.side === "unstaged" && state.focused?.apply(),
     u: () => review && state.side === "staged" && state.focused?.apply(),
     e: () => review && editSelection(),
+    g: () => showGuide(true),
     "/": () => !review && $("#revset").focus(),
   };
   const action = actions[event.key];
@@ -3683,6 +4496,7 @@ async function start() {
   setView(state.view);
   // The header shows the git branch on every view.
   if (state.view !== "review") loadStatus().catch(fail);
+  if (setting("guide-open", false)) showGuide(true, false);
 }
 
 start();

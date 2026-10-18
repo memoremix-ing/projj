@@ -43,6 +43,7 @@ use crate::git::GitError;
 use crate::git::Side;
 use crate::git::Status;
 use crate::git::StatusEntry;
+use crate::guide::Guide;
 use crate::jj::Jj;
 use crate::jj::Session;
 use crate::root;
@@ -97,6 +98,8 @@ pub struct App {
     /// A folder chooser is showing; there is only ever one.
     choosing: AtomicBool,
     roots: Mutex<HashMap<PathBuf, Arc<Root>>>,
+    /// Conversations with Codex, beside the review.
+    guide: Guide,
 }
 
 /// One root, as pages review it.
@@ -109,7 +112,7 @@ pub struct Root {
 }
 
 impl Root {
-    fn new(path: PathBuf) -> Self {
+    pub(crate) fn new(path: PathBuf) -> Self {
         Self {
             git: Git::new(&path),
             drafts_root: store::root_key(&path),
@@ -119,16 +122,14 @@ impl Root {
     }
 
     /// The jj repositories and workspaces currently under the root.
-    async fn repos(self: &Arc<Self>) -> Result<Arc<Vec<Repo>>, ApiError> {
+    pub(crate) async fn repos(self: &Arc<Self>) -> anyhow::Result<Arc<Vec<Repo>>> {
         if let Some((at, repos)) = &*self.repos.lock().unwrap()
             && at.elapsed() < DISCOVERY_TTL
         {
             return Ok(repos.clone());
         }
         let root = self.clone();
-        let repos = tokio::task::spawn_blocking(move || root::discover(&root.path))
-            .await
-            .map_err(|err| ApiError::Internal(err.into()))??;
+        let repos = tokio::task::spawn_blocking(move || root::discover(&root.path)).await??;
         let repos = Arc::new(repos);
         *self.repos.lock().unwrap() = Some((Instant::now(), repos.clone()));
         Ok(repos)
@@ -147,7 +148,14 @@ impl App {
             chooser: None,
             choosing: AtomicBool::new(false),
             roots: Mutex::default(),
+            guide: Guide::new(crate::codex::locate()),
         }
+    }
+
+    /// Runs Codex from `program` for the guide, or has no Codex.
+    pub fn with_codex(mut self, program: Option<PathBuf>) -> Self {
+        self.guide = Guide::new(program);
+        self
     }
 
     /// Opens `root` for pages that name no root.
@@ -333,6 +341,13 @@ pub fn router(app: AppState) -> Router {
         .route("/api/jj/evolution", get(jj_evolution))
         .route("/api/jj/operations", get(jj_operations))
         .route("/api/jj/snapshot", post(jj_snapshot))
+        .route("/api/guide", get(guide_get))
+        .route("/api/guide/events", get(guide_events))
+        .route("/api/guide/send", post(guide_send))
+        .route("/api/guide/stop", post(guide_stop))
+        .route("/api/guide/reset", post(guide_reset))
+        .route("/api/guide/answer", post(guide_answer))
+        .route("/api/guide/leave", post(guide_leave))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(app)
 }
@@ -1102,6 +1117,126 @@ async fn jj_snapshot(
     }
     let message = [text(&output.stdout), text(&output.stderr)].join("\n");
     Ok(Json(json!({ "ok": true, "message": message.trim() })))
+}
+
+#[derive(Deserialize)]
+struct PageQuery {
+    /// Names the page, which makes a name up for itself when it loads.
+    #[serde(default)]
+    page: String,
+    #[serde(default)]
+    after: u64,
+}
+
+/// The guide for this root: whether it can be used, and the conversation
+/// so far. Starts Codex, if it is not running, to find out.
+async fn guide_get(
+    State(app): State<AppState>,
+    Here(root): Here,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<serde_json::Value> {
+    let mut answer = app.guide.conversation(&app, &root).snapshot(&query.page);
+    answer["problem"] = app.guide.problem().await.into();
+    answer["program"] = app.guide.program().into();
+    Ok(Json(answer))
+}
+
+/// What happened in the conversation after event `after`; waits a while if
+/// nothing has yet.
+async fn guide_events(
+    State(app): State<AppState>,
+    Here(root): Here,
+    Query(query): Query<PageQuery>,
+) -> ApiResult<serde_json::Value> {
+    let conversation = app.guide.conversation(&app, &root);
+    Ok(Json(conversation.events(&query.page, query.after).await))
+}
+
+#[derive(Deserialize)]
+struct GuideMessage {
+    page: String,
+    text: String,
+    /// What the page shows, for Codex to know what "this" is.
+    #[serde(default)]
+    context: serde_json::Value,
+    /// How hard Codex thinks; its own setting if left out.
+    effort: Option<String>,
+}
+
+async fn guide_send(
+    State(app): State<AppState>,
+    Here(root): Here,
+    Json(message): Json<GuideMessage>,
+) -> ApiResult<serde_json::Value> {
+    let text = message.text.trim();
+    if text.is_empty() {
+        return Err(ApiError::BadRequest("nothing to send".into()));
+    }
+    let effort = message
+        .effort
+        .as_deref()
+        .filter(|effort| ["low", "medium", "high"].contains(effort));
+    app.guide
+        .conversation(&app, &root)
+        .send(&message.page, text, &message.context, effort)
+        .await
+        .map_err(|err| ApiError::Conflict(format!("{err:#}")))?;
+    Ok(Json(json!({})))
+}
+
+async fn guide_stop(State(app): State<AppState>, Here(root): Here) -> ApiResult<serde_json::Value> {
+    app.guide.conversation(&app, &root).stop().await?;
+    Ok(Json(json!({})))
+}
+
+/// Starts the conversation over.
+async fn guide_reset(
+    State(app): State<AppState>,
+    Here(root): Here,
+) -> ApiResult<serde_json::Value> {
+    app.guide.conversation(&app, &root).reset().await;
+    Ok(Json(json!({})))
+}
+
+#[derive(Deserialize)]
+struct GuideAnswer {
+    call: String,
+    #[serde(default)]
+    result: serde_json::Value,
+    /// Why the page could not do what was asked.
+    error: Option<String>,
+}
+
+/// The page's answer to something the guide asked of it.
+async fn guide_answer(
+    State(app): State<AppState>,
+    Here(root): Here,
+    Json(answer): Json<GuideAnswer>,
+) -> ApiResult<serde_json::Value> {
+    let result = match answer.error {
+        Some(error) => Err(error),
+        None => Ok(answer.result),
+    };
+    let taken = app
+        .guide
+        .conversation(&app, &root)
+        .answer(&answer.call, result);
+    Ok(Json(json!({ "taken": taken })))
+}
+
+#[derive(Deserialize)]
+struct PageBody {
+    page: String,
+}
+
+/// The page is closing.
+async fn guide_leave(
+    State(app): State<AppState>,
+    Here(root): Here,
+    Json(body): Json<PageBody>,
+) -> ApiResult<serde_json::Value> {
+    app.guide.conversation(&app, &root).leave(&body.page);
+    Ok(Json(json!({})))
 }
 
 #[cfg(test)]

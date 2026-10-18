@@ -8,12 +8,14 @@
 pub mod api;
 pub mod bundled_jj;
 pub mod chooser;
+mod codex;
 mod diff;
 mod files;
 pub mod finder;
 pub mod gate;
 mod git;
 mod git_builtin;
+mod guide;
 pub mod jj;
 pub mod root;
 pub mod store;

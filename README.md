@@ -270,6 +270,46 @@ changes.
 | `t` | Switch between To review and Reviewed |
 | `1` `2` | Review, History |
 | `/` | Edit the revset |
+| `g` | Show jjent and ask it something |
+
+## jjent
+
+jjent, in the top bar, opens a conversation with
+[Codex](https://github.com/openai/codex) in a drawer on the right. It can
+walk through the unreviewed changes in an order that makes them easy to
+follow, and answer questions about any file in the root, changed or not. As
+it explains, it points: it scrolls the page to a file, hunk or line, and
+highlights lines with a short note, in the diff or, for a file without
+changes, in the editor. Places it mentions in a reply are links that go there.
+A walkthrough appears as a tour, a numbered list of steps; going to a step
+highlights what it covers without asking Codex again, and you can ask about
+any step whenever you like. Every message takes along a
+description of what the page shows, what you selected in a diff or the editor,
+and which step of a tour you are on, so "this" means what you are looking at;
+the line under the message box says what goes. The thinking menu trades
+speed for care, and New starts the conversation over.
+
+Codex runs on the machine projj runs on, as `codex app-server`, signed in as
+you would sign in for the command line (`codex login`). projj finds it on the
+`PATH` or where installers put it, or at `PROJJ_CODEX`. Each root has one
+conversation, kept by the server for as long as it runs, whichever page or
+port shows it; the page that sent the latest message is the one Codex points
+on.
+
+Codex works in code mode, with tools projj gives it: it answers by writing
+JavaScript that calls them. Those that read (`changes`, `diff`, `read`,
+`files`, `workspaces`, `jj_log`, `jj_diff`) are answered by the server, from
+the same git and jj the page uses, so the hunks it talks about are the ones
+on screen. Those that act on the page (`view`, `show`, `highlight`,
+`clear_highlights`, and `tour`) are handed to the page, which does them and
+says how it went. The page cannot be made to do anything else: no staging,
+no saving, no editing.
+
+Codex itself is started read-only: its sandbox may read the machine but write
+nothing, it is never asked for approval and so never gets any, and its
+threads go without what your own Codex setup adds (MCP servers, plugins,
+apps, computer and browser use, image generation, web search, memories).
+It is told not to run `jj`, since every jj command writes a snapshot.
 
 ## What is kept on the device
 
@@ -327,6 +367,19 @@ git repository, written with `encodeURIComponent`. The server keeps no
 | `POST /api/roots/choose` | `{start?}` | Show the folder chooser and wait; what was chosen, as `inspect` says, or `null`. 404 if there is none, 409 if one is open |
 | `DELETE /api/roots/recent` | `path` | Take a root off the recent list |
 
+jjent's conversation is the root's, and a page names itself with a `page`
+it makes up when it loads:
+
+| Method and path (`X-Projj-Root`) | Parameters | Result |
+| --- | --- | --- |
+| `GET /api/guide` | `page` | The conversation so far (`entries`, `seq`, `running`), and why jjent cannot be used, if it cannot (`problem`). Starts Codex to find out |
+| `GET /api/guide/events` | `page`, `after` | What happened after event `after`, waiting up to 20 seconds for something: `events`, each an `entry` (added or replaced), a `delta` (text added to a reply), a `status`, a `reset`, or a `call` for the page named to answer; or everything again, with `resync`, for a page too far behind |
+| `POST /api/guide/send` | `{page, text, context?, effort?}` | Send a message, with the page's description of itself (`context`) and how hard to think (`low`, `medium` or `high`); while Codex is answering, it joins that answer |
+| `POST /api/guide/answer` | `{call, result?, error?}` | The page's answer to a `call` |
+| `POST /api/guide/stop` | | Stop Codex mid-answer |
+| `POST /api/guide/reset` | | Start the conversation over |
+| `POST /api/guide/leave` | `{page}` | The page is closing; point on another |
+
 | Method and path (`X-Projj-Root`) | Parameters | Result |
 | --- | --- | --- |
 | `GET /api/root` | | Root path, repositories, workspaces; puts it first among the recent roots |
@@ -376,6 +429,9 @@ into that hunk's `lines`.
 | `src/bundled_jj.rs` | jj's command line, built in: `projj jj` and the snapshot button |
 | `src/store.rs` | The device-wide store: unsaved editor text, display settings, recent roots |
 | `src/api.rs` | The API's routes, and `Local` for calling them in process |
+| `src/codex.rs` | A client for `codex app-server`: the process and its JSON-RPC |
+| `src/guide.rs` | jjent's conversations, and how pages hear of them |
+| `src/guide/tools.rs` | What Codex is told, the tools it gets, and the answers to those that read |
 | `src/gate.rs` | Who may use `projj serve`: one-time links, sessions, origin checks |
 | `web/` | Client, embedded in the binary; plain HTML, CSS, and JS |
 | `web/highlight.js` | Syntax tokens for the editor, computed in the page |
@@ -419,7 +475,10 @@ through the page: by search, by a typed path, by starting new ones, and
 through the menu back, and another fills a new root from the editor:
 making files and folders, renaming and moving them, and deleting them. The harness redeems each server's link itself
 and hands the session to the browser. `--headed` shows the browser, `--only <name>` picks
-tests, `CHROME` and `PROJJ_BIN` choose the binaries.
+tests, `CHROME` and `PROJJ_BIN` choose the binaries. jjent's tests talk
+to `scripts/fake-codex.mjs`, a stand-in for `codex app-server` that echoes
+messages and calls tools by script (see its header), so they need no Codex
+and no network; it can be tried by hand with `PROJJ_CODEX`.
 
 `PROJJ_SEARCH_DIRS` (a list, like `PATH`) makes root search look there
 instead of the home folder, and `PROJJ_FOLDER_CHOOSER` names a program to
@@ -427,6 +486,12 @@ run instead of the system's folder dialog: it is given the folder to start
 in and prints the one chosen, or nothing. The tests use both.
 
 ## Known limits
+
+- jjent leans on parts of Codex that are still marked experimental:
+  code mode, and tools given by the app (`dynamicTools`). A Codex release can
+  change them. Tried with codex-cli 0.163.0.
+- A conversation lasts as long as the server: restarting it starts over.
+  Codex's sandbox lets it read anything the user can, not only the root.
 
 - The built-in git (used only when no git is installed) can draw a diff's
   hunks differently from git: its line diff, from grit-lib, does not always

@@ -10,7 +10,7 @@
 // the first Chrome found and target/release/projj (or target/debug/projj).
 
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -90,13 +90,15 @@ async function main() {
   const processes = [];
   try {
     const root = join(work, "root");
+    // The guide talks to a stand-in for Codex, which logs what it is sent.
+    const codex = { PROJJ_CODEX: join(SDK, "scripts/fake-codex.mjs"), FAKE_CODEX_LOG: join(work, "codex.log") };
     const made = spawnSync(join(SDK, "scripts/make-scratch-root.sh"), [root, "120"], { encoding: "utf8" });
     if (made.status !== 0) fail(`make-scratch-root.sh failed:\n${made.stderr}`);
 
     const server = await launch(
       found(SERVERS, "projj binary (build it first)"),
       ["serve", "--root", root, "--port", "0", "--web-dir", join(SDK, "web")],
-      { PROJJ_DATA_DIR: join(work, "data") },
+      { PROJJ_DATA_DIR: join(work, "data"), ...codex },
       LINK,
     );
     processes.push(server.child);
@@ -105,7 +107,7 @@ async function main() {
     const other = await launch(
       found(SERVERS, "projj binary (build it first)"),
       ["serve", "--root", root, "--port", "0", "--web-dir", join(SDK, "web")],
-      { PROJJ_DATA_DIR: join(work, "data") },
+      { PROJJ_DATA_DIR: join(work, "data"), ...codex },
       LINK,
     );
     processes.push(other.child);
@@ -121,7 +123,7 @@ async function main() {
     const loose = await launch(
       found(SERVERS, "projj binary (build it first)"),
       ["serve", "--port", "0", "--web-dir", join(SDK, "web")],
-      { PROJJ_DATA_DIR: join(work, "data"), PROJJ_SEARCH_DIRS: `${root}:${elsewhere}`, PROJJ_FOLDER_CHOOSER: chooser },
+      { PROJJ_DATA_DIR: join(work, "data"), PROJJ_SEARCH_DIRS: `${root}:${elsewhere}`, PROJJ_FOLDER_CHOOSER: chooser, ...codex },
       LINK,
       join(elsewhere, "start"),
     );
@@ -169,7 +171,7 @@ async function main() {
         await call(site, "/api/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, value: null }) });
       }
       try {
-        await run(page, site, site2, { browser, server, site3, work: elsewhere, root, call });
+        await run(page, site, site2, { browser, server, site3, work: elsewhere, root, call, codexLog: codex.FAKE_CODEX_LOG });
         console.log(`ok    ${name}`);
       } catch (err) {
         failures++;
@@ -420,7 +422,87 @@ async function pressEnter(page) {
 /** The options the root chooser shows: kind and path. */
 const ROOT_OPTIONS = `return [...document.querySelectorAll("#roots-list [role=option]")].map((li) => li.className.replace(/.*kind-/, "") + " " + li.querySelector(".roots-path").textContent);`;
 
+// ---- jjent
+
+const LIB = "track/example.com/acme/widgets.git/sts-0/src/lib.rs";
+
+/** Opens the guide on a conversation started afresh. */
+async function openGuide(page, site) {
+  await page.open(site);
+  await page.run(`await fetch("/api/guide/reset", { method: "POST", headers: { "x-projj-root": encodeURIComponent(new URLSearchParams(location.search).get("root")) } });`);
+  await page.click("#guide-toggle");
+  await page.waitFor(`document.querySelector("#guide-log .g-welcome")`);
+}
+
+/** Sends a message from the guide's box, as a person would, and waits for the reply. */
+async function ask(page, text) {
+  const before = await page.run(`return document.querySelectorAll("#guide-log .g-agent").length;`);
+  await page.run(`const input = document.querySelector("#guide-input"); input.focus(); input.value = ${JSON.stringify(text)};`);
+  await pressEnter(page);
+  await page.waitFor(`document.querySelectorAll("#guide-log .g-agent:not(.writing)").length > ${before} && document.querySelector("#guide-stop").hidden`);
+  return page.run(`return [...document.querySelectorAll("#guide-log .g-agent")].at(-1).textContent;`);
+}
+
+const calls = (...list) => `/call ${JSON.stringify(list)}`;
+
 const TESTS = {
+  "jjent answers as it writes, says what it sees, and stops when asked": async (page, site, site2, { codexLog }) => {
+    await openGuide(page, site);
+    const reply = await ask(page, "hello there");
+    if (reply !== "You said: hello there (looking at review)") fail(`the reply was ${reply}`);
+    if (!(await page.run(`return document.querySelector("#guide-log .g-user")?.textContent === "hello there";`))) fail("the message is not shown");
+    // Codex was set up to read only, in code mode, with projj's tools and
+    // without the MCP servers of its own configuration.
+    const sent = readFileSync(codexLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const start = sent.find((message) => message.method === "thread/start").params;
+    if (start.sandbox !== "read-only" || start.approvalPolicy !== "never") fail(`the thread was started with ${start.sandbox}, ${start.approvalPolicy}`);
+    if (start.config["features.code_mode"] !== true || start.config["mcp_servers.someone_elses.enabled"] !== false) fail(`the thread's settings were ${JSON.stringify(start.config)}`);
+    if (!start.dynamicTools[0].tools.some((tool) => tool.name === "highlight")) fail("the thread has no projj tools");
+    // Stopping ends a turn that would otherwise go on.
+    await page.run(`const input = document.querySelector("#guide-input"); input.focus(); input.value = "/wait";`);
+    await pressEnter(page);
+    await page.waitFor(`!document.querySelector("#guide-stop").hidden`);
+    await page.click("#guide-stop");
+    await page.waitFor(`document.querySelector("#guide-stop").hidden && [...document.querySelectorAll("#guide-log .g-note")].some((el) => el.textContent === "Stopped.")`);
+  },
+  "jjent shows and highlights hunks, opens files without changes in the editor, and steps through a tour": async (page, site) => {
+    await openGuide(page, site);
+    let reply = await ask(page, calls(["highlight", { path: LIB, line: 79, note: "now adds step_1" }]));
+    if (!reply.includes('"shown":"diff"')) fail(`the highlight answered ${reply}`);
+    await page.waitFor(`[...document.querySelectorAll("#stream .line.guided")].some((row) => row.textContent.includes("step_1()"))`);
+    await page.waitFor(`document.querySelector("#stream .guide-note")?.textContent === "now adds step_1"`);
+    // The rows are on screen.
+    const seen = await page.run(`
+      const row = document.querySelector("#stream .line.guided"), box = document.querySelector("#stream").getBoundingClientRect();
+      const r = row.getBoundingClientRect();
+      return r.top >= box.top && r.bottom <= box.bottom;
+    `);
+    if (!seen) fail("the highlighted lines are off screen");
+    // A file without changes opens in the editor, marked there.
+    reply = await ask(page, calls(["highlight", { path: "sts-0/.gitignore", line: 1, note: "build output" }]));
+    if (!reply.includes('"shown":"editor"')) fail(`the highlight answered ${reply}`);
+    await page.waitFor(`document.querySelector(".editor-layer.active .editor-mark span")?.textContent === "build output"`);
+    if (await page.run(`return document.querySelectorAll("#stream .line.guided").length;`)) fail("the earlier highlight was kept");
+    reply = await ask(page, calls(["view", {}]));
+    if (!reply.includes('"file":"track/example.com/acme/widgets.git/sts-0/.gitignore"')) fail(`the view was ${reply}`);
+    reply = await ask(page, calls(["show", { path: "no/such/file.txt" }]));
+    if (!reply.includes("failed: there is no file no/such/file.txt")) fail(`showing nothing answered ${reply}`);
+    // A tour: going to a step highlights its places.
+    const tour = { title: "The change", steps: [
+      { title: "First the steps", explain: "Where it starts.", places: [{ path: LIB, line: 5, end: 7 }] },
+      { title: "Then the guide", places: [{ path: "track/example.com/acme/widgets.git/sts-0/docs/guide.md", line: 7 }] },
+    ] };
+    await ask(page, calls(["tour", tour]));
+    await page.waitFor(`document.querySelector("#guide-log .g-tour .g-step.current")?.textContent.includes("First the steps")`);
+    await page.click("#guide-log .g-tour header button", "Next");
+    await page.waitFor(`document.querySelector("#stream .guide-note")?.textContent === "Then the guide"`);
+    await page.waitFor(`[...document.querySelectorAll("#stream .line.guided")].some((row) => row.closest(".file").dataset.key.endsWith("docs/guide.md"))`);
+    if (!(await page.run(`return document.querySelector("#guide-context").textContent.includes("step 2 of the tour");`))) fail("the step is not sent along");
+    // A place named in a reply goes there when clicked.
+    await ask(page, `\`${LIB}:6\``);
+    await page.click("#guide-log .g-agent button.g-place");
+    await page.waitFor(`[...document.querySelectorAll("#stream .line.guided")].some((row) => row.textContent.includes("widened"))`);
+  },
   "a new root fills up from the editor: files and folders made, renamed, and deleted": async (page, site, site2, { site3, work, call }) => {
     const fresh = join(work, "fill-me");
     const made = await call(site3, "/api/roots/init", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: fresh }) });

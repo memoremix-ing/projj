@@ -45,6 +45,10 @@ time. Settings
 and unsaved edits are kept in the same device store as for `projj serve`,
 so both see the same ones.
 
+jjent (see the main README) works the same in the app, given Codex on
+the machine, which it looks for where installers put it, since the `PATH` of
+an app started from the Finder is bare.
+
 Nothing else needs installing: as with `projj`, jj is built in, and so is a
 git, used when the machine has none. Apps started from the Finder get a bare
 `PATH`, so the app looks for an installed git in the usual places too:
