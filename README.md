@@ -162,7 +162,7 @@ Selecting text in a diff offers an Edit button, which opens the file in an
 editor drawer below the diff, with that text selected. The diff stays in view
 and usable above it, so what was there, what is there, and what you are about
 to write can be read together; drag the drawer's top edge to resize it. The
-Editor button in the top bar opens the drawer without a selection. The review
+Editor button in the bottom bar opens the drawer without a selection. The review
 file list and the drawer's file explorer are as wide as you drag their right
 edges (or move them with the arrow keys once focused); double-clicking an
 edge puts the usual width back.
@@ -240,7 +240,7 @@ however many there are. A line that is wholly new or gone, or shares no word
 with the line it replaced, is marked from its first character to its last,
 including every line of a file that is entirely new or deleted.
 
-Tweaks, in the top bar, opens a panel beside the page for adjusting how diffs
+Tweaks, in the bottom bar, opens a panel above it for adjusting how diffs
 read: how strongly changed lines are tinted and changed words marked, whether
 changed words are underlined too, how much syntax color shows, and the size
 and spacing of code in diffs and the editor. A sample diff in the panel shows

@@ -37,11 +37,11 @@
       </select>
     </label>
     <button type="button" id="guide-toggle" class="review-only" aria-pressed="false" aria-controls="guide" title="Talk the changes through with Codex">jjent</button>
-    <button type="button" id="editor-toggle" class="review-only" aria-pressed="false" title="Show or hide the editor">Editor</button>
-    <button type="button" id="refresh" class="review-only" title="Reload from disk">Reload</button>
-    <button type="button" id="theme" title="Switch between light and dark">Theme</button>
-    <button type="button" id="tweaks-open" aria-pressed="false" title="Adjust colors and type for reading">Tweaks</button>
-    <button type="button" id="help-open" class="review-only" title="Keyboard shortcuts (?)">Keys</button>
+    <!-- Shows the moon in light and the sun in dark: what a press switches to. -->
+    <button type="button" id="theme" class="theme-toggle" aria-label="Switch to dark" title="Switch to dark">
+      <svg class="moon" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 9.6A5.75 5.75 0 0 1 6.4 2.5a5.75 5.75 0 1 0 7.1 7.1z" /></svg>
+      <svg class="sun" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="3" /><path d="M8 1v1.6 M8 13.4V15 M1 8h1.6 M13.4 8H15 M3.05 3.05l1.13 1.13 M11.82 11.82l1.13 1.13 M3.05 12.95l1.13-1.13 M11.82 4.18l1.13-1.13" /></svg>
+    </button>
   </div>
 </header>
 
@@ -163,6 +163,17 @@
   </form>
 </aside>
 </div>
+
+<footer class="foot">
+  <div class="foot-tools">
+    <button type="button" id="editor-toggle" class="review-only" aria-pressed="false" title="Show or hide the editor">Editor</button>
+    <button type="button" id="refresh" class="review-only" title="Reload from disk">Reload</button>
+  </div>
+  <div class="foot-tools">
+    <button type="button" id="tweaks-open" aria-pressed="false" title="Adjust colors and type for reading">Tweaks</button>
+    <button type="button" id="help-open" class="review-only" title="Keyboard shortcuts (?)">Keys</button>
+  </div>
+</footer>
 
 <dialog id="merge" aria-labelledby="merge-title">
   <header>

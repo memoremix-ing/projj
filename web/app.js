@@ -4131,6 +4131,9 @@ async function loadSettings() {
 
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
+  const label = theme === "dark" ? "Switch to light" : "Switch to dark";
+  $("#theme").setAttribute("aria-label", label);
+  $("#theme").title = label;
   applyTweaks();
   if ($("#tweaks").open) renderTweaks();
 }
