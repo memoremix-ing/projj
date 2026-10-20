@@ -375,6 +375,11 @@ fn open_window(root: Option<&Path>, query: &str) -> Result<(), String> {
         decide_navigation: Some(electrobun::allow_all_navigation),
         event: Some(electrobun::noop_webview_event),
         event_bridge: Some(electrobun::noop_webview_post_message),
+        // Without a handler of projj's own, Electrobun's core acts on the
+        // page's internal requests itself: it would open webviews on any
+        // address, with any preload, and run script in any other webview,
+        // this one included. projj uses none of that.
+        internal_bridge: Some(electrobun::noop_webview_post_message),
         ..WebviewCallbacks::default()
     };
     let webview_id = match d.core.create_webview(web) {

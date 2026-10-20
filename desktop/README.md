@@ -62,9 +62,14 @@ since `jj-lib` needs 1.89 or later).
 
 ```sh
 hutch electrobun sync          # once: fetches Electrobun's SDK into .hutch/
-hutch run dev                  # build and open a dev build (with the debugging port)
+hutch run dev                  # build and open a dev build
 hutch run build                # a stable build and .dmg, in build/ and artifacts/
 ```
+
+Electrobun gives dev builds CEF's remote debugging port, which anything on the
+device could use to drive the page, so `electrobun.config.ts` turns it off.
+To debug, build with `PROJJ_CEF_DEBUG_PORT=9222 hutch run dev`, and build
+again without it when done.
 
 `Cargo.lock` is kept in step with `../Cargo.lock`, since Hutch builds with
 `--locked`. To try the app on a scratch root without touching the real

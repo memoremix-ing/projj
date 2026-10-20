@@ -6,6 +6,18 @@ const page = Object.fromEntries(
 	["index.html", "app.js", "highlight.js", "style.css"].map((name) => [`web/${name}`, `views/projj/${name}`]),
 );
 
+// CEF's remote debugging, which Electrobun turns on for dev builds, listens on
+// loopback with no sign-in: any process on the device could drive the page,
+// and through it the API. Off unless asked for, for one build:
+//
+//   PROJJ_CEF_DEBUG_PORT=9222 hutch run dev
+const engine = {
+	bundleCEF: true,
+	// One engine everywhere, the one the browser tests drive.
+	defaultRenderer: "cef",
+	chromiumFlags: { "remote-debugging-port": process.env.PROJJ_CEF_DEBUG_PORT || false },
+} as const;
+
 export default {
 	app: {
 		name: "projj",
@@ -22,10 +34,9 @@ export default {
 			binary: "main",
 		},
 		copy: page,
-		// One engine everywhere, the one the browser tests drive.
-		mac: { bundleCEF: true, defaultRenderer: "cef" },
-		linux: { bundleCEF: true, defaultRenderer: "cef" },
-		win: { bundleCEF: true, defaultRenderer: "cef" },
+		mac: engine,
+		linux: engine,
+		win: engine,
 	},
 	runtime: {
 		exitOnLastWindowClosed: true,
