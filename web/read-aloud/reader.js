@@ -198,6 +198,13 @@ export class ReadAloud extends EventTarget {
     this.#changed();
   }
 
+  /** The text selected under the root, as a Range, or `null` if none is. */
+  get selection() {
+    const selection = this.#root.ownerDocument.getSelection();
+    const range = selection?.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0) : null;
+    return range && this.#root.contains(range.startContainer) ? range : null;
+  }
+
   /** Which sentence is being read, of how many: `{ index, count }`. */
   get position() {
     return { index: this.#index, count: this.#sentences.length };
@@ -207,7 +214,8 @@ export class ReadAloud extends EventTarget {
    * Starts reading: from `from` (a Range or Node) if given, else from the
    * selection if there is one under the root, else from the first sentence
    * on screen. Given `within` (an element, such as the pane last used), the
-   * first sentence on screen is looked for there first.
+   * first sentence on screen is looked for there first. Starting while
+   * reading moves reading there.
    */
   start({ from, within } = {}) {
     this.stop();
@@ -274,9 +282,7 @@ export class ReadAloud extends EventTarget {
       point = from.ownerDocument.createRange();
       point.selectNodeContents(from);
     } else {
-      const selection = this.#root.ownerDocument.getSelection();
-      const range = selection?.rangeCount && !selection.isCollapsed ? selection.getRangeAt(0) : null;
-      if (range && this.#root.contains(range.startContainer)) point = range;
+      point = this.selection;
     }
     if (point) {
       for (const [i, { block, start, end }] of this.#sentences.entries()) {

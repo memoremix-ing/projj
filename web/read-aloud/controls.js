@@ -1,5 +1,6 @@
-// <read-aloud-controls>: play and pause, skipping by sentence, speed, and a
-// voice picker, for a ReadAloud given as its `reader` property.
+// <read-aloud-controls>: play and pause, skipping by sentence, reading from
+// the selection, speed, and a voice picker, for a ReadAloud given as its
+// `reader` property.
 //
 // It shows itself while reading, or always with `persistent`. It floats at
 // the foot of the window, or with `placement="inline"` sits where the app
@@ -54,6 +55,7 @@ const ICONS = {
   pause: "M6 5h4v14H6zM14 5h4v14h-4z",
   previous: "M6 6h2v12H6zm3.5 6 8.5 6V6z",
   next: "M6 18l8.5-6L6 6zM16 6h2v12h-2z",
+  selection: "M4 4h6v2H8v12h2v2H4v-2h2V6H4zm9 3v10l8-5z",
   close: "M6 6l12 12M18 6 6 18",
 };
 
@@ -99,6 +101,7 @@ export class ReadAloudControls extends HTMLElement {
   #dismissed = false;
   #onChange = () => this.#render();
   #onVoices = () => this.#fillVoices();
+  #onSelection = () => this.#renderSelection();
 
   constructor() {
     super();
@@ -115,6 +118,7 @@ export class ReadAloudControls extends HTMLElement {
       previous: button("previous", "Previous sentence", () => this.#reader?.previous()),
       play: button("play", "Read aloud", () => this.#reader?.toggle()),
       next: button("next", "Next sentence", () => this.#reader?.next()),
+      selection: button("selection", "Read from selection", () => this.#readSelection()),
       status: h("span", { class: "status", role: "status", "aria-live": "polite" }),
       rate: h("select", { title: "Speed", "aria-label": "Speed", onchange: (event) => this.#reader && (this.#reader.rate = event.target.value) }),
       language: h("select", { title: "Voices for", "aria-label": "Voices for", onchange: (event) => this.#pickLanguage(event.target.value) }),
@@ -122,10 +126,12 @@ export class ReadAloudControls extends HTMLElement {
       hint: h("details", { hidden: true }, h("summary", null, "Get better voices"), h("p")),
       close: button("close", "Stop and close", () => this.#close()),
     };
+    // Pressing it must not take the selection away, as some engines do when the focus moves.
+    parts.selection.addEventListener("mousedown", (event) => event.preventDefault());
     this.#parts = parts;
     shadow.append(
       h("div", { class: "bar", role: "toolbar", "aria-label": "Read aloud" },
-        parts.previous, parts.play, parts.next, parts.status,
+        parts.previous, parts.play, parts.next, parts.selection, parts.status,
         h("span", { class: "sep" }),
         parts.rate, parts.language, parts.voice, parts.close, parts.hint),
     );
@@ -146,7 +152,21 @@ export class ReadAloudControls extends HTMLElement {
   }
 
   connectedCallback() {
+    document.addEventListener("selectionchange", this.#onSelection);
     this.#render();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("selectionchange", this.#onSelection);
+  }
+
+  #readSelection() {
+    const from = this.#reader?.selection;
+    if (from) this.#reader.start({ from });
+  }
+
+  #renderSelection() {
+    this.#parts.selection.disabled = !this.#reader?.selection;
   }
 
   #close() {
@@ -215,6 +235,7 @@ export class ReadAloudControls extends HTMLElement {
     parts.play.title = playLabel;
     parts.play.setAttribute("aria-label", playLabel);
     parts.previous.disabled = parts.next.disabled = state === "idle";
+    this.#renderSelection();
 
     const error = state === "idle" ? reader?.error : null;
     parts.status.textContent = state === "starting" ? "Starting…" : error ? MESSAGES[error] || `Speech failed (${error}).` : "";

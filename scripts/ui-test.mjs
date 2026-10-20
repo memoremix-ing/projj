@@ -1014,7 +1014,7 @@ const TESTS = {
     `);
     if (!seen) fail(`${before} is off screen: ${JSON.stringify(place)}`);
   },
-  "reading aloud starts at the selection, reads old and new wording apart, and keeps its speed": async (page, site, site2, { call }) => {
+  "reading aloud starts at the selection, reads old and new wording apart, moves to a new selection, and keeps its speed": async (page, site, site2, { call }) => {
     await page.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_SPEECH });
     await page.open(site);
     await page.click("#tree .file-row", "guide.md");
@@ -1037,6 +1037,30 @@ const TESTS = {
     ];
     if (JSON.stringify(spoken) !== JSON.stringify(expected)) fail(`read ${JSON.stringify(spoken)}`);
     if (!(await page.run(`return CSS.highlights.has("read-aloud-word");`))) fail("no word is highlighted");
+
+    // Selecting further on while reading, then pressing Read from selection, moves reading there.
+    await page.run(`getSelection().removeAllRanges();`);
+    await sleep(50);
+    if (!(await page.run(`return ${readerControl(".selection")}.disabled;`))) fail("Read from selection was enabled with nothing selected");
+    const later = await page.run(`
+      const card = [...document.querySelector("#stream").children].find((el) => el.dataset.key === ${JSON.stringify(GUIDE)});
+      const line = [...card.querySelectorAll(".line .text")].filter((el) => el.textContent.startsWith("Paragraph")).at(-1);
+      getSelection().selectAllChildren(line);
+      return line.textContent;
+    `);
+    const box = await page.run(`
+      const button = ${readerControl(".selection")};
+      if (button.disabled) return null;
+      const r = button.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    `);
+    if (!box) fail("Read from selection stayed disabled with text selected");
+    await page.run(`window.spoken.length = 0;`);
+    for (const type of ["mousePressed", "mouseReleased"]) await page.send("Input.dispatchMouseEvent", { type, ...box, button: "left", clickCount: 1 });
+    await page.waitFor(`window.spoken.length >= 1`);
+    const jumped = await page.run(`return { text: window.spoken[0], selected: getSelection().toString() };`);
+    if (jumped.text !== later.trim()) fail(`after Read from selection, read ${JSON.stringify(jumped.text)}, not ${JSON.stringify(later)}`);
+    if (jumped.selected !== later) fail(`pressing Read from selection left the selection as ${JSON.stringify(jumped.selected)}`);
 
     // The speed is a display setting, kept with the others.
     await page.run(`const select = ${readerControl("select")}; select.value = "1.5"; select.dispatchEvent(new Event("change"));`);

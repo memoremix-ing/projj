@@ -1,3 +1,3 @@
 A copy of read-aloud's src/, made by scripts/vendor-read-aloud.sh from
-slvrqrwxuqrw 2b78beb7c0b6 Paragraphs an app defines, starting within a pane, inline controls, and highlights that skip what is not read
+tvokzmvwwvvs 9a3b8b3fb9f8 Read from selection: a button that moves reading to the selected text, leaving the selection as it was
 Change it in read-aloud (track/github.com/memoremix-ing/read-aloud.git), not here.
