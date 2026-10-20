@@ -435,6 +435,57 @@ const ROOT_OPTIONS = `return [...document.querySelectorAll("#roots-list [role=op
 // ---- jjent
 
 const LIB = "track/example.com/acme/widgets.git/sts-0/src/lib.rs";
+const GUIDE = "track/example.com/acme/widgets.git/sts-0/docs/guide.md";
+
+/**
+ * A stand-in for the system's speech, put in before the page loads: it says
+ * nothing, takes 10 ms a word, and keeps what it was given in `spoken`.
+ */
+const FAKE_SPEECH = `{
+  window.spoken = [];
+  const voice = { name: "Test Voice", lang: "en-US", voiceURI: "test-voice", localService: true, default: true };
+  let current = null;
+  const synth = Object.assign(new EventTarget(), {
+    speaking: false,
+    pending: false,
+    paused: false,
+    getVoices: () => [voice],
+    speak(utterance) {
+      spoken.push(utterance.text);
+      current = utterance;
+      this.speaking = true;
+      const words = [...utterance.text.matchAll(/\\S+/g)];
+      let i = 0;
+      const step = () => {
+        if (current !== utterance) return;
+        if (this.paused) return void setTimeout(step, 10);
+        if (i === 0) utterance.onstart?.({});
+        if (i < words.length) {
+          utterance.onboundary?.({ name: "word", charIndex: words[i].index, charLength: words[i][0].length });
+          i++;
+          return void setTimeout(step, 10);
+        }
+        current = null;
+        this.speaking = false;
+        utterance.onend?.({});
+      };
+      setTimeout(step, 0);
+    },
+    cancel() {
+      const was = current;
+      current = null;
+      this.speaking = false;
+      was?.onerror?.({ error: "canceled" });
+    },
+    pause() { this.paused = true; },
+    resume() { this.paused = false; },
+  });
+  Object.defineProperty(window, "speechSynthesis", { value: synth, configurable: true });
+  window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
+}`;
+
+/** Clicks a control of the reader's, inside its shadow root. */
+const readerControl = (name) => `document.querySelector("read-aloud-controls").shadowRoot.querySelector(${JSON.stringify(name)})`;
 
 /** Opens the guide on a conversation started afresh. */
 async function openGuide(page, site) {
@@ -962,6 +1013,53 @@ const TESTS = {
       return r.bottom > s.top && r.top < s.bottom;
     `);
     if (!seen) fail(`${before} is off screen: ${JSON.stringify(place)}`);
+  },
+  "reading aloud starts at the selection, reads old and new wording apart, and keeps its speed": async (page, site, site2, { call }) => {
+    await page.send("Page.addScriptToEvaluateOnNewDocument", { source: FAKE_SPEECH });
+    await page.open(site);
+    await page.click("#tree .file-row", "guide.md");
+    await settledPlace(page, GUIDE);
+    // From the old wording of paragraph 5, selected.
+    await page.run(`
+      const card = [...document.querySelector("#stream").children].find((el) => el.dataset.key === ${JSON.stringify(GUIDE)});
+      getSelection().selectAllChildren(card.querySelector(".line.del .text"));
+    `);
+    await page.click("#read-aloud");
+    await page.waitFor(`window.spoken.length >= 3`);
+    const shown = await page.run(`return { controls: !document.querySelector("read-aloud-controls").hidden, button: !document.querySelector("#read-aloud").hidden };`);
+    if (!shown.controls || shown.button) fail(`while reading, the controls were ${shown.controls ? "shown" : "hidden"} and the button ${shown.button ? "shown" : "hidden"}`);
+    // Each line's own words, without numbers or signs: the old, then the new, then on.
+    const spoken = await page.run(`return window.spoken.slice(0, 3);`);
+    const expected = [
+      "Paragraph 5 explains how widget number 5 is assembled and tested.",
+      "Paragraph 5 explains how widget number 5 is assembled, inspected, and tested.",
+      "Paragraph 6 explains how widget number 6 is assembled and tested.",
+    ];
+    if (JSON.stringify(spoken) !== JSON.stringify(expected)) fail(`read ${JSON.stringify(spoken)}`);
+    if (!(await page.run(`return CSS.highlights.has("read-aloud-word");`))) fail("no word is highlighted");
+
+    // The speed is a display setting, kept with the others.
+    await page.run(`const select = ${readerControl("select")}; select.value = "1.5"; select.dispatchEvent(new Event("change"));`);
+    await sleep(500);
+    const { settings } = await (await call(site, "/api/settings")).json();
+    if (settings["read-aloud"]?.rate !== 1.5) fail(`the settings were ${JSON.stringify(settings)}`);
+
+    await page.run(`${readerControl(".close")}.click();`);
+    await page.waitFor(`document.querySelector("read-aloud-controls").hidden && !document.querySelector("#read-aloud").hidden`);
+    if (await page.run(`return CSS.highlights.size;`)) fail("highlights were left behind");
+
+    // Without a selection, from what is on screen in the diffs.
+    await page.run(`getSelection().removeAllRanges(); window.spoken.length = 0;`);
+    await page.click("#read-aloud");
+    await page.waitFor(`window.spoken.length >= 1`);
+    const first = await page.run(`
+      const stream = document.querySelector("#stream").getBoundingClientRect();
+      const range = [...CSS.highlights.get("read-aloud-sentence")][0];
+      const r = range.getBoundingClientRect();
+      return { text: window.spoken[0], inStream: document.querySelector("#stream").contains(range.startContainer), onScreen: r.bottom > stream.top && r.top < stream.bottom };
+    `);
+    if (!first.inStream || !first.onScreen) fail(`started at ${JSON.stringify(first)}`);
+    await page.run(`${readerControl(".close")}.click();`);
   },
 };
 

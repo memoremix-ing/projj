@@ -1,6 +1,7 @@
 // projj web client. No build step: this file is served as written.
 
 import { grammarFor } from "/highlight.js";
+import { mountReadAloud } from "/read-aloud/read-aloud.js";
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 
@@ -34,6 +35,8 @@ function desktopBridge() {
   const receive = (message) => {
     // The app is quitting: hand over unsaved edits now, as when a tab closes.
     if (message?.type === "projj-flush") return void flushDrafts();
+    // Edit > Read Aloud in the app's menu.
+    if (message?.type === "projj-read-aloud") return void readAloud();
     if (message?.type !== "projj" || !waiting.has(message.id)) return;
     waiting.get(message.id)(message);
     waiting.delete(message.id);
@@ -4195,6 +4198,96 @@ async function reload() {
   await loadStatus();
 }
 
+// ----------------------------------------------------------- read aloud
+//
+// Reads the page aloud with the system's voices, as Edge's Read Aloud does:
+// from the selection, else from what is on screen in the pane last used. The
+// reader is read-aloud, copied into web/read-aloud by
+// scripts/vendor-read-aloud.sh.
+
+/** Never read: the chrome around what is being reviewed, and the parts of a diff that are not its text. */
+const READ_ALOUD_SKIP = [
+  "header.bar", "footer.foot", "#menu", "#review .side", ".history-bar", "#editor", "#toast", "#selection-actions",
+  ".no", ".sign", ".eol", ".hunk-head", ".hunk-foot", ".file-head .status", ".file-head .counts", ".file-head .actions",
+  // Side by side, unchanged lines show twice; the right side has them.
+  ".line.ctx.left",
+  "#guide > header", "#guide-form", ".g-acts",
+].join(", ");
+
+/** Files read as prose, whose diffs read in paragraphs rather than line by line. */
+const PROSE = /\.(md|markdown|mdx|txt|text|rst|adoc|org)$/i;
+
+/** Where reading can start, the one last clicked or scrolled in first. */
+const READING_PANES = "#stream, #detail, #log, #guide-log, #roots";
+
+let reader = null;
+let lastPane = null;
+const runKeys = new WeakMap();
+
+/**
+ * In a prose file's diff, lines of one kind (unchanged, removed or added)
+ * read as one paragraph, up to a blank line: sentences wrapped across lines
+ * read whole, and the old wording is heard apart from the new. Code reads
+ * line by line, as laid out.
+ */
+function diffParagraph(element) {
+  const row = element.closest(".line");
+  const hunk = row?.closest(".hunk");
+  if (!hunk?.hunk || !PROSE.test(hunk.closest(".file")?.querySelector(".file-head .path")?.textContent || "")) return undefined;
+  if (runKeys.has(row)) return runKeys.get(row);
+  const lines = hunk.hunk.lines;
+  let start = Number(row.dataset.index);
+  while (start > 0 && lines[start - 1].kind === lines[start].kind && lines[start - 1].text.trim()) start--;
+  // One value per run, the same for every line of it.
+  const runs = runKeys.get(hunk) || new Map();
+  runKeys.set(hunk, runs);
+  if (!runs.has(start)) runs.set(start, {});
+  runKeys.set(row, runs.get(start));
+  return runs.get(start);
+}
+
+function readingPane() {
+  if (lastPane?.isConnected && lastPane.checkVisibility?.()) return lastPane;
+  return $(state.view === "roots" ? "#roots" : state.view === "history" ? "#detail" : "#stream");
+}
+
+/** Starts reading, or pauses or resumes it. */
+function readAloud() {
+  if (!reader) return;
+  if (reader.state === "idle") reader.start({ within: readingPane() });
+  else reader.toggle();
+}
+
+function bindReadAloud() {
+  const mounted = mountReadAloud({
+    root: document.body,
+    skip: READ_ALOUD_SKIP,
+    paragraph: diffParagraph,
+    // In the app, Edit > Read Aloud has the shortcut.
+    shortcut: false,
+    // With the other display settings, the same in every projj page.
+    storage: { load: () => setting("read-aloud", null), save: (value) => saveSetting("read-aloud", value) },
+  });
+  reader = mounted.reader;
+  // In the foot of the page, between its two sets of tools, while reading.
+  mounted.controls.setAttribute("placement", "inline");
+  $(".foot .foot-tools").after(mounted.controls);
+  const button = $("#read-aloud");
+  button.addEventListener("click", readAloud);
+  reader.addEventListener("change", () => (button.hidden = reader.state !== "idle"));
+  for (const type of ["pointerdown", "wheel", "focusin"]) {
+    document.addEventListener(type, (event) => (lastPane = event.target.closest?.(READING_PANES) || lastPane), { capture: true, passive: true });
+  }
+  if (!desktop) {
+    const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform);
+    document.addEventListener("keydown", (event) => {
+      if (event.key.toLowerCase() !== "u" || !event.shiftKey || event.altKey || (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey)) return;
+      event.preventDefault();
+      readAloud();
+    });
+  }
+}
+
 // ------------------------------------------------------------- settings
 //
 // Display settings are kept by the server, in the store that every projj
@@ -4590,6 +4683,7 @@ async function start() {
   widthHandle($("#review .side"), "side-width", "Resize the review file list", keepPlace);
   bind();
   bindMenu();
+  bindReadAloud();
   const params = new URLSearchParams(location.search);
   if (params.has("roots")) return enterRoots({ path: params.get("path") });
   state.rootPath = params.get("root");

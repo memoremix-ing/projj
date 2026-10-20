@@ -280,6 +280,20 @@ correctly.
 log. Shift-click a change, or use "Compare from here", to diff between two
 changes.
 
+**Read aloud** (at the foot of the page, ⌘⇧U, or Edit > Read Aloud in the
+app) reads the page to you with the system's voices, as Edge's Read Aloud
+does: from the selection, else from what is on screen where you last clicked
+or scrolled, highlighting each sentence and word and keeping them in view.
+Diffs are read without their numbers and signs, removed lines included. In a
+prose file, such as Markdown, lines of one kind read on as paragraphs, so a
+sentence wrapped across lines reads whole and the old wording is heard apart
+from the new; code reads line by line. The controls that show while reading
+pause, skip by sentence, change the speed, and pick the voice. On a Mac,
+the Premium voices (free in System Settings > Accessibility > Spoken
+Content) sound far better than those it starts with. The reader is
+read-aloud (`track/github.com/memoremix-ing/read-aloud.git`), copied into
+`web/read-aloud/`.
+
 | Key | Action |
 | --- | --- |
 | `j` `k` | Next or previous hunk (Review), change (History) |
@@ -291,6 +305,7 @@ changes.
 | `1` `2` | Review, History |
 | `/` | Edit the revset |
 | `g` | Show jjent and ask it something |
+| `⌘⇧U` (`Ctrl+Shift+U` off a Mac) | Read aloud, or pause and resume |
 
 ## jjent
 
@@ -335,7 +350,7 @@ It is told not to run `jj`, since every jj command writes a snapshot.
 
 Text typed in the editor and not yet saved, display settings (theme,
 layout, context, the Tweaks, the widths of the file lists, the editor's size
-and whether its file list shows), and the 30 roots opened last are kept by
+and whether its file list shows, and the voice and speed for reading aloud), and the 30 roots opened last are kept by
 the server, not by the browser, in one [Turso](https://docs.turso.tech/)
 database for the whole device:
 
@@ -457,6 +472,7 @@ into that hunk's `lines`.
 | `src/gate.rs` | Who may use `projj serve`: one-time links, sessions, origin checks |
 | `web/` | Client, embedded in the binary; plain HTML, CSS, and JS |
 | `web/highlight.js` | Syntax tokens for the editor, computed in the page |
+| `web/read-aloud/` | Reading the page aloud: a copy of read-aloud, kept by `scripts/vendor-read-aloud.sh` |
 | `desktop/` | The desktop app: Electrobun, with projj in its Rust main process |
 | `spikes/git-engines/` | Not built with projj: gitoxide and grit-lib writing the index, compared with git |
 
@@ -478,8 +494,12 @@ against a scratch root, not against a root someone is reviewing in, and point
 store. With `--web-dir`, the client is read from disk on each request, so
 edits to `web/` show up on reload.
 
-The client has no build step and no dependencies. `web/highlight.test.mjs` is
-not served; it runs under Node's own test runner.
+The client has no build step and no dependencies but read-aloud, a copy of
+whose modules lives in `web/read-aloud/`. Change read-aloud in its own track
+(`track/github.com/memoremix-ing/read-aloud.git`), then bring the change in
+with `scripts/vendor-read-aloud.sh`, which notes in `web/read-aloud/SOURCE`
+which change the copy is of. `web/highlight.test.mjs` is not served; it runs
+under Node's own test runner.
 
 `scripts/ui-test.mjs` builds a scratch root with many changed files, serves it
 from `web/` with a throwaway store, and drives an installed Chrome through the
@@ -495,7 +515,9 @@ and import as JSON, and that a browser not given the link is shut out. One
 starts a server in a folder outside any repository and chooses roots
 through the page: by search, by a typed path, by starting new ones, and
 through the menu back, and another fills a new root from the editor:
-making files and folders, renaming and moving them, and deleting them. The harness redeems each server's link itself
+making files and folders, renaming and moving them, and deleting them. One
+reads aloud through a stand-in for the system's speech that keeps what it is
+given, and checks where reading starts and what is read. The harness redeems each server's link itself
 and hands the session to the browser. `--headed` shows the browser, `--only <name>` picks
 tests, `CHROME` and `PROJJ_BIN` choose the binaries. jjent's tests talk
 to `scripts/fake-codex.mjs`, a stand-in for `codex app-server` that echoes

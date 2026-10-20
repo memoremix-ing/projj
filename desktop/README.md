@@ -41,7 +41,10 @@ one root; the projj button at the top left opens a panel whose "Choose a
 projj" goes back to choosing another;
 File > New Window (⌘N) opens another chooser, and File > Open Folder… (⌘O)
 goes straight to a folder. The roots open when you quit come back next
-time. Settings
+time. Edit > Read Aloud (⌘⇧U) reads the page aloud, as the page's own Read
+aloud button does. Speech started from the menu is not started by a click
+in the page, which Chromium allows only where media may play without one,
+so the app lets its page do that; the page plays no media. Settings
 and unsaved edits are kept in the same device store as for `projj serve`,
 so both see the same ones.
 
