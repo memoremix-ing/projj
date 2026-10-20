@@ -37,7 +37,7 @@ function fail(message) {
 }
 
 /** The link `projj serve` prints, and the address in it. */
-const LINK = /projj: open (http:\/\/[^/\s]+)\/\?token=[0-9a-f]{64}/;
+const LINK = /projj: open ((http:\/\/[^/\s]+)\/#token=[0-9a-f]{64})/;
 
 /** Starts a process and resolves with the first match of `pattern` in its output. */
 function launch(command, argv, env, pattern, cwd) {
@@ -102,7 +102,7 @@ async function main() {
       LINK,
     );
     processes.push(server.child);
-    const site = server.match[1];
+    const site = server.match[2];
     // A second server on the same device store, as on another port.
     const other = await launch(
       found(SERVERS, "projj binary (build it first)"),
@@ -111,7 +111,7 @@ async function main() {
       LINK,
     );
     processes.push(other.child);
-    const site2 = other.match[1];
+    const site2 = other.match[2];
     // One started in a folder that is in no repository, as a newcomer
     // might, with a folder chooser that always picks the same folder.
     const elsewhere = join(work, "elsewhere");
@@ -128,7 +128,7 @@ async function main() {
       join(elsewhere, "start"),
     );
     processes.push(loose.child);
-    const site3 = loose.match[1];
+    const site3 = loose.match[2];
 
     const chrome = await launch(
       found(CHROMES, "Chrome (set CHROME)"),
@@ -146,17 +146,26 @@ async function main() {
     );
     processes.push(chrome.child);
     const browser = await devtools(chrome.match[1]);
-    // Each server prints one link, good once. The harness follows it itself
-    // and gives the browser the same session, so both can use the server.
-    const cookies = {};
+    // Each server prints one link, good once. A tab follows it, as a person
+    // would, and the harness takes the session it got, to use itself and to
+    // hand to every test's tab.
+    const sessions = {};
     for (const { match } of [server, other, loose]) {
-      const response = await fetch(match[0].slice("projj: open ".length), { redirect: "manual" });
-      const [pair] = (response.headers.get("set-cookie") || fail(`no session from ${match[1]}`)).split(";");
-      const [name, value] = pair.split("=");
-      cookies[match[1]] = pair;
-      await browser.send("Storage.setCookies", { cookies: [{ name, value, domain: "127.0.0.1", path: "/", httpOnly: true }] });
+      const { targetId } = await browser.send("Target.createTarget", { url: "about:blank" });
+      const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
+      const tab = pageApi(browser, sessionId);
+      await tab.send("Page.navigate", { url: match[1] });
+      await tab.waitFor(`sessionStorage.getItem("projj-session")`);
+      sessions[match[2]] = await tab.run(`return sessionStorage.getItem("projj-session");`);
+      await browser.send("Target.closeTarget", { targetId });
     }
-    const call = (site, path, init = {}) => fetch(`${site}${path}`, { ...init, headers: { ...init.headers, cookie: cookies[site] } });
+    const signIn = `{
+      const session = ${JSON.stringify(sessions)}[location.origin];
+      if (session && !sessionStorage.getItem("projj-session")) sessionStorage.setItem("projj-session", session);
+    }`;
+    // As a script would: by address, where the page's name need not resolve.
+    const call = (site, path, init = {}) =>
+      fetch(`http://127.0.0.1:${new URL(site).port}${path}`, { ...init, headers: { ...init.headers, "x-projj-session": sessions[site] } });
 
     let failures = 0;
     for (const [name, run] of Object.entries(TESTS)) {
@@ -164,6 +173,7 @@ async function main() {
       const { targetId } = await browser.send("Target.createTarget", { url: "about:blank" });
       const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
       const page = pageApi(browser, sessionId);
+      await page.send("Page.addScriptToEvaluateOnNewDocument", { source: signIn });
       // Every test starts with nothing marked reviewed, and stock settings.
       spawnSync("git", ["-C", root, "reset", "-q"]);
       const { settings } = await (await call(site, "/api/settings")).json();
@@ -171,7 +181,7 @@ async function main() {
         await call(site, "/api/settings", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, value: null }) });
       }
       try {
-        await run(page, site, site2, { browser, server, site3, work: elsewhere, root, call, codexLog: codex.FAKE_CODEX_LOG });
+        await run(page, site, site2, { browser, server, site3, work: elsewhere, root, call, sessions, codexLog: codex.FAKE_CODEX_LOG });
         console.log(`ok    ${name}`);
       } catch (err) {
         failures++;
@@ -429,7 +439,7 @@ const LIB = "track/example.com/acme/widgets.git/sts-0/src/lib.rs";
 /** Opens the guide on a conversation started afresh. */
 async function openGuide(page, site) {
   await page.open(site);
-  await page.run(`await fetch("/api/guide/reset", { method: "POST", headers: { "x-projj-root": encodeURIComponent(new URLSearchParams(location.search).get("root")) } });`);
+  await page.run(`await fetch("/api/guide/reset", { method: "POST", headers: { "x-projj-root": encodeURIComponent(new URLSearchParams(location.search).get("root")), "x-projj-session": sessionStorage.getItem("projj-session") } });`);
   await page.click("#guide-toggle");
   await page.waitFor(`document.querySelector("#guide-log .g-welcome")`);
 }
@@ -603,29 +613,63 @@ const TESTS = {
     await page.click("#roots-offer button", "Start a new root here");
     await page.waitFor(`document.querySelector("#root-name")?.textContent === "chosen"`);
   },
-  "a browser that was not given the link is shut out": async (page, site, site2, { browser }) => {
-    // A browser context of its own has none of the harness's cookies.
+  "a browser that was not given the link is shut out, and its tabs share one that was": async (page, site, site2, { browser, sessions }) => {
+    // A browser context of its own has none of the harness's sessions.
     const { browserContextId } = await browser.send("Target.createBrowserContext");
-    const { targetId } = await browser.send("Target.createTarget", { url: "about:blank", browserContextId });
-    const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
-    const stranger = pageApi(browser, sessionId);
+    const tab = async () => {
+      const { targetId } = await browser.send("Target.createTarget", { url: "about:blank", browserContextId });
+      const { sessionId } = await browser.send("Target.attachToTarget", { targetId, flatten: true });
+      const opened = pageApi(browser, sessionId);
+      await opened.send("Page.enable");
+      return opened;
+    };
+    const signedOut = `document.querySelector(".signed-out")?.textContent.includes("Open the link")`;
     try {
-      await stranger.send("Page.enable");
+      const stranger = await tab();
       await stranger.send("Page.navigate", { url: site });
-      await stranger.waitFor(`document.readyState === "complete" && document.body`);
+      await stranger.waitFor(signedOut);
       const seen = await stranger.run(`
         const api = await fetch("/api/root");
         const write = await fetch("/api/settings", { method: "POST", headers: { "content-type": "application/json" }, body: '{"key":"theme","value":"dark"}' });
-        return { text: document.body.innerText, api: api.status, write: write.status, app: Boolean(document.querySelector("#stream")) };
+        return { api: api.status, write: write.status, app: Boolean(document.querySelector("#stream")), cookie: document.cookie };
       `);
-      if (seen.app || !seen.text.includes("Open the link")) fail(`the app showed: ${JSON.stringify(seen)}`);
-      if (seen.api !== 401 || seen.write !== 401) fail(`the API answered ${seen.api} and ${seen.write}`);
-      // A spent link is no use to it either.
-      await stranger.send("Page.navigate", { url: `${site}/?token=${"0".repeat(64)}` });
-      await stranger.waitFor(`document.body?.innerText.includes("used already")`);
+      if (seen.app || seen.api !== 401 || seen.write !== 401) fail(`a stranger got: ${JSON.stringify(seen)}`);
+      // A spent link is no use to it either, and is taken out of the address.
+      await stranger.send("Page.navigate", { url: `${site}/#token=${"0".repeat(64)}` });
+      await stranger.waitFor(`document.body?.innerText.includes("used already") && location.hash === ""`);
+
+      // Once one tab of the browser is let in, a new one borrows its
+      // session, and one already shut out follows.
+      const first = await tab();
+      await first.send("Page.navigate", { url: site });
+      await first.waitFor(signedOut);
+      await first.run(`sessionStorage.setItem("projj-session", ${JSON.stringify(sessions[site])});`);
+      // Reloading from inside the page could leave the evaluation unanswered.
+      await first.send("Page.reload");
+      await first.waitFor(`document.querySelectorAll("#tree .file-row").length > 0`);
+      // What another tab offers is tried before it is taken.
+      await first.run(`new BroadcastChannel("projj-session").postMessage({ session: ${JSON.stringify("0".repeat(64))} });`);
+      await sleep(300);
+      if (!(await stranger.run(`return ${signedOut};`))) fail("a made-up session was taken");
+      const second = await tab();
+      await second.send("Page.navigate", { url: site });
+      await second.waitFor(`document.querySelectorAll("#tree .file-row").length > 0`);
+      await stranger.waitFor(`document.querySelectorAll("#tree .file-row").length > 0`);
+      if (await second.run(`return document.cookie;`)) fail("projj set a cookie");
     } finally {
-      await browser.send("Target.closeTarget", { targetId });
       await browser.send("Target.disposeBrowserContext", { browserContextId });
+    }
+  },
+  "pages are served only at the run's own name, which projj holds at either loopback address": async (page, site) => {
+    const { port, hostname } = new URL(site);
+    if (!/^projj-[0-9a-f]{32}\.localhost$/.test(hostname)) fail(`the link is at ${hostname}`);
+    // Scripts may come by either address.
+    const page6 = await (await fetch(`http://[::1]:${port}/`)).text();
+    if (!page6.includes("/app.js")) fail(`[::1]:${port} answered ${page6.slice(0, 80)}`);
+    // A browser at any other name is told where projj is, and nothing else.
+    for (const host of ["localhost", "review.localhost", "127.0.0.1"]) {
+      await page.send("Page.navigate", { url: `http://${host}:${port}/` });
+      await page.waitFor(`document.body?.innerText.includes(${JSON.stringify(`${site}/`)}) && !document.querySelector("#stream")`);
     }
   },
   "clicking a far-off file scrolls it to the top": async (page, site) => {

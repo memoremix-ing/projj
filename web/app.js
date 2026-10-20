@@ -57,6 +57,112 @@ function desktopBridge() {
   };
 }
 
+// `projj serve` answers only pages handed a link from its terminal (see
+// src/gate.rs). The link's one-time token, after `#`, is traded for a session
+// that the tab keeps in sessionStorage and sends with every request. Other
+// tabs of the browser borrow it over a BroadcastChannel, so a second tab
+// needs no link of its own. Both belong to this server's port alone; a
+// cookie would be sent to every port of 127.0.0.1. The desktop app has no
+// server and needs none of this.
+
+const SESSION_HEADER = "x-projj-session";
+const access = {
+  session: desktop ? null : sessionStorage.getItem("projj-session"),
+  /** Whether the server has turned `session` away (it restarted, say). */
+  refused: false,
+  channel: desktop ? null : new BroadcastChannel("projj-session"),
+  /** Called with true once a session is borrowed. */
+  waiting: [],
+  borrowing: null,
+};
+
+function keepSession(session) {
+  Object.assign(access, { session, refused: false });
+  sessionStorage.setItem("projj-session", session);
+  for (const resolve of access.waiting.splice(0)) resolve(true);
+}
+
+/** Whether the server takes `session`: true, false, or null if it does not answer. */
+async function sessionWorks(session) {
+  const response = await fetch("/api/session", { headers: { [SESSION_HEADER]: session } }).catch(() => null);
+  return response ? response.ok : null;
+}
+
+/** Asks the other tabs for their session; resolves with whether a working one came in time. */
+function borrowSession(within = 400) {
+  return new Promise((resolve) => {
+    access.waiting.push(resolve);
+    access.channel.postMessage({ ask: true });
+    setTimeout(() => {
+      access.waiting = access.waiting.filter((waiter) => waiter !== resolve);
+      resolve(false);
+    }, within);
+  });
+}
+
+access.channel?.addEventListener("message", async ({ data }) => {
+  const usable = access.session && !access.refused;
+  if (data?.ask && usable) access.channel.postMessage({ session: access.session });
+  // Offers are tried before they are taken: one may come from a tab left
+  // open since an earlier run of the server.
+  else if (typeof data?.session === "string" && !usable && (await sessionWorks(data.session))) keepSession(data.session);
+});
+
+/** Gets the tab a session if it has none. Resolves with null, or why it could not. */
+async function signIn() {
+  let why = "This tab has not been let in to this projj server yet.";
+  const token = /^#token=([0-9a-f]+)$/.exec(location.hash)?.[1];
+  if (token) {
+    // Out of the address bar and history.
+    history.replaceState(null, "", location.pathname + location.search);
+    const response = await fetch("/api/session", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token }),
+    }).catch(() => null);
+    const answer = await response?.json().catch(() => null);
+    if (response?.ok && answer?.session) {
+      keepSession(answer.session);
+      // Tabs signed out, by a restart of the server say, carry on with it.
+      access.channel.postMessage({ session: answer.session });
+      return null;
+    }
+    if (answer?.error) why = answer.error;
+  }
+  if (access.session) {
+    const works = await sessionWorks(access.session);
+    if (works) return null;
+    if (works === null) return `projj serve is not answering at ${location.host}.`;
+    access.refused = true;
+  }
+  return (await borrowSession()) ? null : why;
+}
+
+// A link opened in a tab already showing this server changes only what is
+// after `#`, which loads nothing by itself.
+if (!desktop) addEventListener("hashchange", () => /^#token=/.test(location.hash) && location.reload());
+
+/** Shows how to get in instead of the app, and carries on once another tab shares a session. */
+function signedOut(why) {
+  const how = "Open the link that projj serve printed in its terminal. Each link works once; press Enter in that terminal for another. Once a tab of this browser is let in, this one follows.";
+  let theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  try {
+    theme = JSON.parse(localStorage.getItem(SETTINGS_COPY))?.theme || theme;
+  } catch {}
+  document.documentElement.dataset.theme = theme;
+  document.title = "projj";
+  document.body.replaceChildren(h("main", { class: "signed-out" }, h("h1", null, "projj"), h("p", null, why), h("p", null, how)));
+  access.waiting.push(() => location.reload());
+}
+
+/** After the server turned `sent` away: borrows a newer session from another tab, if one has it. */
+function recoverSession(sent) {
+  if (access.session !== sent) return Promise.resolve(true);
+  access.refused = true;
+  access.borrowing ??= borrowSession().finally(() => (access.borrowing = null));
+  return access.borrowing;
+}
+
 async function request(method, path, params, body) {
   // The desktop page's own address is not one the API lives at.
   const url = new URL(path, desktop ? "http://projj.invalid" : location.origin);
@@ -71,18 +177,23 @@ async function request(method, path, params, body) {
   if (desktop) {
     ({ status, body: text } = await desktop.send(method, url.pathname + url.search, root, payload));
   } else {
-    const headers = {};
-    if (body) headers["content-type"] = "application/json";
-    if (root) headers["x-projj-root"] = root;
-    const response = await fetch(url, {
-      method,
-      headers,
-      body: payload,
-      // Lets a small write finish even if the page is closed under it.
-      keepalive: method !== "GET" && (payload?.length || 0) < KEEPALIVE_LIMIT,
-    });
-    ({ status } = response);
-    text = await response.text();
+    for (let tries = 0; ; tries++) {
+      const headers = {};
+      if (body) headers["content-type"] = "application/json";
+      if (root) headers["x-projj-root"] = root;
+      const sent = access.session;
+      if (sent) headers[SESSION_HEADER] = sent;
+      const response = await fetch(url, {
+        method,
+        headers,
+        body: payload,
+        // Lets a small write finish even if the page is closed under it.
+        keepalive: method !== "GET" && (payload?.length || 0) < KEEPALIVE_LIMIT,
+      });
+      ({ status } = response);
+      text = await response.text();
+      if (status !== 401 || tries > 0 || !(await recoverSession(sent))) break;
+    }
   }
   let data = null;
   try {
@@ -4468,6 +4579,8 @@ function onKey(event) {
 }
 
 async function start() {
+  const shutOut = desktop ? null : await signIn();
+  if (shutOut) return signedOut(shutOut);
   await loadSettings();
   state.context = Number(setting("context", 3)) || 3;
   $("#context").value = String(state.context);

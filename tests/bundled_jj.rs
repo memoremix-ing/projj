@@ -1,14 +1,14 @@
-//! `projj jj` is a whole jj, needing nothing installed.
+//! `projj vcs` is a whole jj, needing nothing installed.
 
 use std::path::Path;
 use std::process::Command;
 use std::process::Output;
 
-/// Runs `projj jj ARGS` in `dir` with no PATH, so no installed jj or git can
+/// Runs `projj vcs ARGS` in `dir` with no PATH, so no installed jj or git can
 /// stand in, and with no user configuration.
 fn jj(dir: &Path, home: &Path, args: &[&str]) -> Output {
     let output = Command::new(env!("CARGO_BIN_EXE_projj"))
-        .arg("jj")
+        .arg("vcs")
         .args(args)
         .current_dir(dir)
         .env_clear()
@@ -21,7 +21,7 @@ fn jj(dir: &Path, home: &Path, args: &[&str]) -> Output {
         .unwrap();
     assert!(
         output.status.success(),
-        "projj jj {args:?}: {}",
+        "projj vcs {args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     output

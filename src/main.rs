@@ -1,9 +1,6 @@
 use std::ffi::OsString;
 use std::io::IsTerminal as _;
 use std::io::Write as _;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -53,8 +50,8 @@ enum Command {
     /// Run jj: the version built into projj (0.43.0), which reads and
     /// writes repositories exactly as projj does.
     #[command(disable_help_flag = true)]
-    Jj {
-        /// Passed to jj as they are; `projj jj --help` is jj's help.
+    Vcs {
+        /// Passed to jj as they are; `projj vcs --help` is jj's help.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
         args: Vec<OsString>,
     },
@@ -99,7 +96,7 @@ fn main() -> Result<()> {
     // Before anything else: this may be a process started to be jj.
     projj::bundled_jj::be_jj_if_asked();
     let command = Cli::parse().command;
-    if let Command::Jj { args } = command {
+    if let Command::Vcs { args } = command {
         let err = projj::bundled_jj::replace_process(args);
         return Err(err).context("cannot run the built-in jj");
     }
@@ -135,7 +132,7 @@ async fn run(command: Command) -> Result<()> {
             data,
         } => serve(root, port, web_dir, data.store()?).await,
         Command::Drafts { discard, data } => drafts(data.store()?, discard).await,
-        Command::Jj { .. } => unreachable!("handled before the runtime starts"),
+        Command::Vcs { .. } => unreachable!("handled before the runtime starts"),
     }
 }
 
@@ -211,12 +208,9 @@ async fn serve(
     store: store::Store,
 ) -> Result<()> {
     let (root, start_dir) = starting_point(root)?;
-    // Loopback only: this server stages changes on behalf of whoever asks.
-    let requested = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-    let listener = tokio::net::TcpListener::bind(requested)
-        .await
-        .with_context(|| format!("cannot listen on {requested}"))?;
-    let addr = listener.local_addr()?;
+    // Loopback only, at both addresses: see `gate::listen`.
+    let listeners = gate::listen(port).await?;
+    let addr = listeners[0].local_addr()?;
     let app = api::App::new(jj::Jj::load()?, web_dir, store)
         .with_default_root(root)
         .with_start_dir(start_dir)
@@ -236,7 +230,9 @@ async fn serve(
     );
     println!("projj: open {}", gate.link());
     if std::io::stdin().is_terminal() {
-        println!("projj: that link lets one browser in, once; press Enter here for another");
+        println!(
+            "projj: that link lets one tab in, once, and other tabs of its browser through it; press Enter here for another"
+        );
         let gate = gate.clone();
         tokio::spawn(async move {
             let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -245,13 +241,24 @@ async fn serve(
             }
         });
     } else {
-        println!("projj: that link lets one browser in, once");
+        println!(
+            "projj: that link lets one tab in, once, and other tabs of its browser through it"
+        );
     }
     let router = api::router(app).layer(axum::middleware::from_fn_with_state(gate, gate::guard));
-    axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let (stop, stopping) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = stop.send(true);
+    });
+    let serving = listeners.into_iter().map(|listener| {
+        let mut stopping = stopping.clone();
+        axum::serve(listener, router.clone())
+            .with_graceful_shutdown(async move {
+                let _ = stopping.wait_for(|stop| *stop).await;
+            })
+            .into_future()
+    });
+    futures::future::try_join_all(serving).await?;
     Ok(())
 }

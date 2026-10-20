@@ -36,7 +36,7 @@ pub fn command<I: IntoIterator<Item = S>, S: Into<OsString>>(args: I) -> std::io
     Ok(command)
 }
 
-/// Runs the built-in jj in place of this process, as `projj jj …` does, and
+/// Runs the built-in jj in place of this process, as `projj vcs …` does, and
 /// returns only if it cannot.
 pub fn replace_process(args: Vec<OsString>) -> std::io::Error {
     let mut command = match command(args) {

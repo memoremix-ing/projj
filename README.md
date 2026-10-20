@@ -49,10 +49,10 @@ workspace. The one exception is the "Snapshot working copy" button, which runs
 ## Run
 
 ```sh
-cargo run --release -- serve       # prints a link to open: http://127.0.0.1:4747/?token=…
+cargo run --release -- serve       # prints a link to open: http://projj-<random>.localhost:4747/#token=…
 cargo run -- list                  # repositories and workspaces under the root
 cargo run -- drafts                # unsaved editor text kept on this device
-cargo run -- jj log                # the jj built into projj
+cargo run -- vcs log               # the jj built into projj
 ```
 
 The root is found by asking git (`git rev-parse --show-toplevel`) which
@@ -88,15 +88,35 @@ Each page names its root in every request (see "HTTP API"), so tabs on
 different roots never act on each other's.
 
 The server can change the git index and files under the root, so it lets in
-only the browser it was meant for. It listens on `127.0.0.1` only, and prints
-a link carrying a one-time token (32 random bytes). The first visit trades the
-token for a session cookie, and the link stops working: nothing else on the
-device, no other user of it, and no web page can use the server without a
-link of its own. Press Enter in the terminal for a new link, to let in another
-browser. Sessions last as long as the server, so a restarted server needs its
-new link. On top of that, it refuses requests whose `Host` or `Origin` is not
-its own address (DNS rebinding, cross-site writes), and asks browsers never to
-show it in another site's frame.
+only the browser it was meant for. It listens on loopback only, at both
+`127.0.0.1` and `[::1]`, and will not start if another program holds either on
+its port: browsers try `[::1]` first for `localhost` and its subdomains, so a
+program there could otherwise pass for projj.
+
+Each run makes up an address of its own, `projj-<32 random hex
+digits>.localhost`, and serves pages only there; a browser at any other name
+is told the address, and nothing else. So each run is a new origin: whatever
+held the port between runs may have left a service worker, storage, or an
+open page on the origin it served (browsers count `localhost` as secure, so
+service workers are allowed there), and none of it reaches a name nobody knew
+before the run. Scripts, which send no `Sec-Fetch-Site`, may also use
+`localhost` or either address. Any other `Host` is refused. projj prints
+a link carrying a one-time token (32 random bytes) after `#`, so the token is
+never sent as part of an address. The page trades it for a session, and the
+link stops working: nothing else on the device, no other user of it, and no
+web page can use the server without a link of its own. The tab keeps its
+session in sessionStorage and sends it with every request; other tabs of the
+same browser on the same port borrow it over a BroadcastChannel, so they need
+no link of their own. Press Enter in the terminal for a new link, to let in
+another browser. Sessions last as long as the server, so a restarted server
+needs its new link; open it in any tab and the others carry on with it.
+
+There is no cookie: browsers send a cookie to every port of the host that set
+it, so any other server on `127.0.0.1` the browser visits would get it, where a
+tab's storage belongs to this port alone. On top of that, the server refuses
+requests whose `Origin` is not the address they were sent to (cross-site
+writes), and asks browsers never to show it in another site's
+frame.
 
 `--data-dir` (or `PROJJ_DATA_DIR`) says where unsaved editor text and display
 settings are kept; see "What is kept on the device".
@@ -116,7 +136,7 @@ as git would, holding `index.lock` throughout. The startup line and
 `/api/root` (`"git"`) say which is in use; `PROJJ_GIT=installed` or
 `PROJJ_GIT=built-in` picks one. Likewise jj needs no installing: projj has jj 0.43.0 built
 in, the same version as the `jj-lib` it reads repositories with, and uses it
-for the snapshot button. `projj jj …` runs it like any `jj`, for a machine
+for the snapshot button. `projj vcs …` runs it like any `jj`, for a machine
 that has none. Agents may use a `jj` of their own; keep it at 0.43.0 too, so
 that it and projj agree on the repository format.
 
@@ -347,9 +367,11 @@ and the page says that edits are not being kept.
 ## HTTP API
 
 Everything the web client does goes through this JSON API. From a script,
-redeem a link as a browser would (follow `/?token=…` once and keep the
-`projj-<port>` cookie it sets), then send that cookie. The desktop app makes
-the same calls, in process. Errors are `{"error": "..."}` with status 400 (bad
+trade a link's token for a session (`POST /api/session` with
+`{"token": "…"}` answers `{"session": "…"}`), then send that in an
+`x-projj-session` header. `GET /api/session` answers 204 while the session is
+good. The desktop app makes the same calls, in process, with no session.
+Errors are `{"error": "..."}` with status 400 (bad
 input), 404 (unknown workspace or root), or 409 (the repository changed
 underneath the request; refetch and retry).
 
@@ -426,7 +448,7 @@ into that hunk's `lines`.
 | `src/diff.rs` | Diff model shared by both, with intra-line highlights |
 | `src/syntax.rs` | Syntax tokens for diff lines |
 | `src/files.rs` | Reading and saving worktree files for the editor |
-| `src/bundled_jj.rs` | jj's command line, built in: `projj jj` and the snapshot button |
+| `src/bundled_jj.rs` | jj's command line, built in: `projj vcs` and the snapshot button |
 | `src/store.rs` | The device-wide store: unsaved editor text, display settings, recent roots |
 | `src/api.rs` | The API's routes, and `Local` for calling them in process |
 | `src/codex.rs` | A client for `codex app-server`: the process and its JSON-RPC |
