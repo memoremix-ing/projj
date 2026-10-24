@@ -42,7 +42,10 @@ projj" goes back to choosing another;
 File > New Window (⌘N) opens another chooser, and File > Open Folder… (⌘O)
 goes straight to a folder. The roots open when you quit come back next
 time. Edit > Speech Mode (⌘⇧K) reads the page aloud, as the page's own
-Speech Mode button does. Speech started from the menu is not started by a click
+Speech Mode button does, and Edit > Speech Mode from Selection (⌘⌥K) reads
+from the selected text, or moves reading there. Only on a Mac does that menu
+item have the key: elsewhere Ctrl+Alt is also AltGr, which types on many
+layouts, so the page keeps Ctrl+Alt+K and lets AltGr+K type. Speech started from the menu is not started by a click
 in the page, which Chromium allows only where media may play without one,
 so the app lets its page do that; the page plays no media. Settings
 and unsaved edits are kept in the same device store as for `projj serve`,

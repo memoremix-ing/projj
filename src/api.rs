@@ -1361,28 +1361,38 @@ mod tests {
         }
     }
 
-    /// Speech Mode's shortcut is contenTTS's default, and every place that
-    /// names it says the same: the app's menu, the page's help, the READMEs.
+    /// Speech Mode's shortcuts are contenTTS's defaults, and every place that
+    /// names them says the same: the app's menu, the page's help, the READMEs.
     #[test]
     fn speech_mode_shortcut_is_the_same_everywhere() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
         let shortcut = read("web/contentts/shortcut.js");
-        let key = shortcut
-            .split("export const DEFAULT_KEY = \"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
-            .expect("web/contentts/shortcut.js exports DEFAULT_KEY");
-        assert!(
-            key.len() == 1 && key.chars().all(|c| c.is_ascii_uppercase()),
-            "{key}"
-        );
+        let exported = |name: &str| {
+            let key = shortcut
+                .split(&format!("export const {name} = \""))
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("web/contentts/shortcut.js exports {name}"));
+            assert!(
+                key.len() == 1 && key.chars().all(|c| c.is_ascii_uppercase()),
+                "{name} = {key}"
+            );
+            key.to_string()
+        };
+        let key = exported("DEFAULT_KEY");
         let mac = format!("⌘⇧{key}");
         let other = format!("Ctrl+Shift+{key}");
+        let selection = exported("DEFAULT_SELECTION_KEY");
+        let selection_mac = format!("⌘⌥{selection}");
+        let selection_other = format!("Ctrl+Alt+{selection}");
         for (path, expected) in [
             (
                 "desktop/src/main.rs",
-                vec![format!("\"accelerator\": \"CommandOrControl+Shift+{key}\"")],
+                vec![
+                    format!("\"accelerator\": \"CommandOrControl+Shift+{key}\""),
+                    format!("json!(\"CommandOrControl+Alt+{selection}\")"),
+                ],
             ),
             (
                 "web/index.html",
@@ -1390,6 +1400,8 @@ mod tests {
                     format!("({mac})"),
                     format!("<kbd>{mac}</kbd>"),
                     format!("({other} off a Mac)"),
+                    format!("<kbd>{selection_mac}</kbd>"),
+                    format!("({selection_other} off a Mac)"),
                 ],
             ),
             (
@@ -1397,11 +1409,17 @@ mod tests {
                 vec![
                     format!("page, {mac},"),
                     format!("| `{mac}` (`{other}` off a Mac) |"),
+                    format!("or {selection_mac}, to move there"),
+                    format!("| `{selection_mac}` (`{selection_other}` off a Mac) |"),
                 ],
             ),
             (
                 "desktop/README.md",
-                vec![format!("Edit > Speech Mode ({mac})")],
+                vec![
+                    format!("Edit > Speech Mode ({mac})"),
+                    format!("Speech Mode from Selection ({selection_mac})"),
+                    format!("keeps {selection_other}"),
+                ],
             ),
         ] {
             let text = read(path);

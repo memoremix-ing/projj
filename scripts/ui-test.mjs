@@ -1102,8 +1102,41 @@ const TESTS = {
     await chord("K");
     await page.waitFor(`window.spoken.length >= 1`);
     await chord("K");
-    await page.waitFor(`${readerControl("button.play")}.title === "Resume"`);
+    await page.waitFor(`${readerControl("button.play")}.getAttribute("aria-label") === "Resume"`);
+    // The controls show the keys.
+    const titles = await page.run(`return [${readerControl("button.play")}.title, ${readerControl(".selection")}.title];`);
+    const keys = mac ? ["⌘⇧K", "⌘⌥K"] : ["Ctrl+Shift+K", "Ctrl+Alt+K"];
+    if (titles[0] !== `Resume (${keys[0]})` || titles[1] !== `Read from selection (${keys[1]})`) fail(`the controls' tooltips were ${JSON.stringify(titles)}`);
+
+    // ⌘⌥K (Ctrl+Alt+K off a Mac) moves reading to the selection.
+    const selectionChord = async () => {
+      // CDP's modifier bits: Alt 1, Ctrl 2, Meta 4. On a Mac, Option makes K report "˚".
+      const modifiers = (mac ? 4 : 2) | 1;
+      const key = mac ? "˚" : "k";
+      for (const type of ["keyDown", "keyUp"]) {
+        await page.send("Input.dispatchKeyEvent", { type, key, code: "KeyK", windowsVirtualKeyCode: 75, modifiers });
+      }
+    };
+    await chord("K");
+    await page.waitFor(`${readerControl("button.play")}.getAttribute("aria-label") === "Pause"`);
+    const target = await page.run(`
+      const card = [...document.querySelector("#stream").children].find((el) => el.dataset.key === ${JSON.stringify(GUIDE)});
+      const line = [...card.querySelectorAll(".line .text")].filter((el) => el.textContent.startsWith("Paragraph")).at(-2);
+      getSelection().selectAllChildren(line);
+      window.spoken.length = 0;
+      return line.textContent.trim();
+    `);
+    await selectionChord();
+    await page.waitFor(`window.spoken.length >= 1`);
+    const moved = await page.run(`return window.spoken[0];`);
+    if (moved !== target) fail(`${mac ? "⌘⌥K" : "Ctrl+Alt+K"} read ${JSON.stringify(moved)}, not ${JSON.stringify(target)}`);
     await page.run(`${readerControl(".close")}.click();`);
+    await page.waitFor(`document.querySelector("contentts-controls").hidden`);
+    // With nothing selected, it does nothing.
+    await page.run(`getSelection().removeAllRanges(); window.spoken.length = 0;`);
+    await selectionChord();
+    await sleep(300);
+    if (await page.run(`return window.spoken.length;`)) fail("the selection shortcut read with nothing selected");
   },
 };
 

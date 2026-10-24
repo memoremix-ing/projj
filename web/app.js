@@ -1,7 +1,14 @@
 // projj web client. No build step: this file is served as written.
 
 import { grammarFor } from "/highlight.js";
-import { DEFAULT_KEY, matchesShortcut, mountContenTTS } from "/contentts/contentts.js";
+import {
+  DEFAULT_KEY,
+  DEFAULT_SELECTION_KEY,
+  matchesShortcut,
+  mountContenTTS,
+  selectionShortcutLabel,
+  shortcutLabel,
+} from "/contentts/contentts.js";
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 
@@ -35,8 +42,9 @@ function desktopBridge() {
   const receive = (message) => {
     // The app is quitting: hand over unsaved edits now, as when a tab closes.
     if (message?.type === "projj-flush") return void flushDrafts();
-    // Edit > Speech Mode in the app's menu.
+    // Edit > Speech Mode, and Speech Mode from Selection, in the app's menu.
     if (message?.type === "projj-speech-mode") return void toggleSpeechMode();
+    if (message?.type === "projj-speech-mode-selection") return void reader?.readSelection();
     if (message?.type !== "projj" || !waiting.has(message.id)) return;
     waiting.get(message.id)(message);
     waiting.delete(message.id);
@@ -4258,16 +4266,22 @@ function toggleSpeechMode() {
 }
 
 function bindSpeechMode() {
+  const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform);
   const mounted = mountContenTTS({
     root: document.body,
     skip: SPEECH_MODE_SKIP,
     paragraph: diffParagraph,
-    // In the app, Edit > Speech Mode has the shortcut.
+    // projj starts reading within the pane last used, so it has the key itself (below).
     shortcut: false,
+    // contenTTS's own, ⌘⌥K, which in the app on a Mac is Edit > Speech Mode
+    // from Selection's instead. Off a Mac the page keeps it even in the app,
+    // since only the page can tell it from AltGr+K typing.
+    selectionShortcut: !(desktop && mac),
     // With the other display settings, the same in every projj page.
     storage: { load: () => setting("speech-mode", null), save: (value) => saveSetting("speech-mode", value) },
   });
   reader = mounted.reader;
+  mounted.controls.shortcuts = { toggle: shortcutLabel(DEFAULT_KEY, mac), selection: selectionShortcutLabel(DEFAULT_SELECTION_KEY, mac) };
   // In the foot of the page, between its two sets of tools, while reading.
   mounted.controls.setAttribute("placement", "inline");
   $(".foot .foot-tools").after(mounted.controls);
@@ -4279,7 +4293,6 @@ function bindSpeechMode() {
   }
   if (!desktop) {
     // contenTTS's own, ⌘⇧K; the app's menu has the same (a test keeps them one).
-    const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform);
     document.addEventListener("keydown", (event) => {
       if (!matchesShortcut(event, DEFAULT_KEY, mac)) return;
       event.preventDefault();

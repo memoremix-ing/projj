@@ -205,6 +205,13 @@ fn menu(packaged: bool) -> String {
     if !packaged {
         view.push(json!({ "label": "Developer Tools", "action": "devtools", "accelerator": "i" }));
     }
+    let mut from_selection = json!({ "label": "Speech Mode from Selection", "action": "speech-mode-selection" });
+    // Off a Mac, Ctrl+Alt is also AltGr, which types (AltGr+K is "ł" on some
+    // layouts): a menu would take it from typing, so there the page has the
+    // key, and tells the two apart.
+    if cfg!(target_os = "macos") {
+        from_selection["accelerator"] = json!("CommandOrControl+Alt+K");
+    }
     json!([
         { "label": "projj", "submenu": [
             { "role": "about" },
@@ -227,6 +234,7 @@ fn menu(packaged: bool) -> String {
             { "type": "separator" },
             // The page reads itself aloud, with contenTTS's shortcut (a test keeps them one).
             { "label": "Speech Mode", "action": "speech-mode", "accelerator": "CommandOrControl+Shift+K" },
+            from_selection,
         ]},
         { "label": "View", "submenu": view },
         { "label": "Window", "submenu": [{ "role": "minimize" }, { "role": "zoom" }] },
@@ -258,11 +266,11 @@ extern "C" fn menu_clicked(_: u32, action: *const c_char) {
                 let _ = d.core.toggle_webview_devtools(webview);
             }
         }
-        "speech-mode" => {
+        // Edit > Speech Mode and Speech Mode from Selection, done by the page.
+        name @ ("speech-mode" | "speech-mode-selection") => {
             if let Some(webview) = webview {
-                let _ = d
-                    .core
-                    .send_host_message_to_webview_json(webview, r#"{"type":"projj-speech-mode"}"#);
+                let message = json!({ "type": format!("projj-{name}") }).to_string();
+                let _ = d.core.send_host_message_to_webview_json(webview, &message);
             }
         }
         _ => {}

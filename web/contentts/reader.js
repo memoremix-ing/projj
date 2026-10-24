@@ -239,6 +239,16 @@ export class ContenTTS extends EventTarget {
     this.#set("speaking");
   }
 
+  /**
+   * Reads from the selected text: starts there, or moves reading there.
+   * Returns whether there was a selection to read from.
+   */
+  readSelection() {
+    const from = this.selection;
+    if (from) this.start({ from });
+    return Boolean(from);
+  }
+
   /** Starts, pauses or resumes, as a single play/pause button would. */
   toggle() {
     if (this.state === "idle") this.start();

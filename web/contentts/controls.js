@@ -102,6 +102,7 @@ export class ContenTTSControls extends HTMLElement {
   #onChange = () => this.#render();
   #onVoices = () => this.#fillVoices();
   #onSelection = () => this.#renderSelection();
+  #shortcuts = {};
 
   constructor() {
     super();
@@ -118,7 +119,7 @@ export class ContenTTSControls extends HTMLElement {
       previous: button("previous", "Previous sentence", () => this.#reader?.previous()),
       play: button("play", "Start Speech Mode", () => this.#reader?.toggle()),
       next: button("next", "Next sentence", () => this.#reader?.next()),
-      selection: button("selection", "Read from selection", () => this.#readSelection()),
+      selection: button("selection", "Read from selection", () => this.#reader?.readSelection()),
       status: h("span", { class: "status", role: "status", "aria-live": "polite" }),
       rate: h("select", { title: "Speed", "aria-label": "Speed", onchange: (event) => this.#reader && (this.#reader.rate = event.target.value) }),
       language: h("select", { title: "Voices for", "aria-label": "Voices for", onchange: (event) => this.#pickLanguage(event.target.value) }),
@@ -151,6 +152,21 @@ export class ContenTTSControls extends HTMLElement {
     this.#fillVoices();
   }
 
+  /**
+   * The shortcuts, as people read them, to show with the buttons they stand
+   * for: `{ toggle, selection }`, as in `{ toggle: "⌘⇧K" }`.
+   */
+  get shortcuts() {
+    return this.#shortcuts;
+  }
+
+  set shortcuts(value) {
+    this.#shortcuts = { toggle: value?.toggle || null, selection: value?.selection || null };
+    const selection = this.#shortcuts.selection;
+    this.#parts.selection.title = selection ? `Read from selection (${selection})` : "Read from selection";
+    this.#render();
+  }
+
   connectedCallback() {
     document.addEventListener("selectionchange", this.#onSelection);
     this.#render();
@@ -158,11 +174,6 @@ export class ContenTTSControls extends HTMLElement {
 
   disconnectedCallback() {
     document.removeEventListener("selectionchange", this.#onSelection);
-  }
-
-  #readSelection() {
-    const from = this.#reader?.selection;
-    if (from) this.#reader.start({ from });
   }
 
   #renderSelection() {
@@ -232,7 +243,7 @@ export class ContenTTSControls extends HTMLElement {
     const speaking = state === "speaking" || state === "starting";
     const playLabel = speaking ? "Pause" : state === "paused" ? "Resume" : "Start Speech Mode";
     parts.play.replaceChildren(icon(speaking ? "pause" : "play"));
-    parts.play.title = playLabel;
+    parts.play.title = this.#shortcuts.toggle ? `${playLabel} (${this.#shortcuts.toggle})` : playLabel;
     parts.play.setAttribute("aria-label", playLabel);
     parts.previous.disabled = parts.next.disabled = state === "idle";
     this.#renderSelection();

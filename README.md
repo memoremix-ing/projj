@@ -282,13 +282,14 @@ changes.
 
 **Speech Mode** (at the foot of the page, ⌘⇧K, or Edit > Speech Mode in
 the app) reads the page to you with the system's voices: from the
-selection, else from what is on screen where you last clicked or scrolled, highlighting each sentence and word and keeping them in view.
+selection, else from what is on screen where you last clicked or scrolled,
+highlighting each sentence and word and keeping them in view.
 Diffs are read without their numbers and signs, removed lines included. In a
 prose file, such as Markdown, lines of one kind read on as paragraphs, so a
 sentence wrapped across lines reads whole and the old wording is heard apart
 from the new; code reads line by line. The controls that show while reading
 pause, skip by sentence, read from the selection (select further on and press
-it to move there), change the speed, and pick the voice. On a Mac,
+it, or ⌘⌥K, to move there), change the speed, and pick the voice. On a Mac,
 the Premium voices (free in System Settings > Accessibility > Spoken
 Content) sound far better than those it starts with. The reader is
 contenTTS (`track/github.com/memoremix-ing/contenTTS.git`), copied into
@@ -306,6 +307,7 @@ contenTTS (`track/github.com/memoremix-ing/contenTTS.git`), copied into
 | `/` | Edit the revset |
 | `g` | Show jjent and ask it something |
 | `⌘⇧K` (`Ctrl+Shift+K` off a Mac) | Speech Mode: start, or pause and resume |
+| `⌘⌥K` (`Ctrl+Alt+K` off a Mac) | Speech Mode from the selection: start there, or move reading there |
 
 ## jjent
 
