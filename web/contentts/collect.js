@@ -5,11 +5,11 @@ import { pointAt, sentences } from "./text.js";
 /** Never read: code that is not text, form controls, media, and the reader's own controls. */
 const SKIP_TAGS = new Set([
   "script", "style", "noscript", "template", "head", "title", "textarea", "input", "select", "option",
-  "button", "svg", "math", "canvas", "video", "audio", "iframe", "object", "embed", "voice-overlay-controls",
+  "button", "svg", "math", "canvas", "video", "audio", "iframe", "object", "embed", "contentts-controls",
 ]);
 
 /** Never read either, whatever the tag. Apps add their own with the `skip` option. */
-const SKIP_SELECTOR = '[hidden], [inert], [aria-hidden="true"], [data-voice-overlay="skip"]';
+const SKIP_SELECTOR = '[hidden], [inert], [aria-hidden="true"], [data-contentts="skip"]';
 
 /**
  * The readable text under `root`, as blocks, one per run of text the page

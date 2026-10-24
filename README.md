@@ -280,10 +280,9 @@ correctly.
 log. Shift-click a change, or use "Compare from here", to diff between two
 changes.
 
-**Read aloud** (at the foot of the page, ⌘⇧U, or Edit > Read Aloud in the
-app) reads the page to you with the system's voices, as Edge's Read Aloud
-does: from the selection, else from what is on screen where you last clicked
-or scrolled, highlighting each sentence and word and keeping them in view.
+**Speech Mode** (at the foot of the page, ⌘⇧U, or Edit > Speech Mode in
+the app) reads the page to you with the system's voices: from the
+selection, else from what is on screen where you last clicked or scrolled, highlighting each sentence and word and keeping them in view.
 Diffs are read without their numbers and signs, removed lines included. In a
 prose file, such as Markdown, lines of one kind read on as paragraphs, so a
 sentence wrapped across lines reads whole and the old wording is heard apart
@@ -292,8 +291,8 @@ pause, skip by sentence, read from the selection (select further on and press
 it to move there), change the speed, and pick the voice. On a Mac,
 the Premium voices (free in System Settings > Accessibility > Spoken
 Content) sound far better than those it starts with. The reader is
-voice-overlay (`track/github.com/memoremix-ing/voice-overlay.git`), copied
-into `web/voice-overlay/`.
+ContenTTS (`track/github.com/memoremix-ing/contentts.git`), copied into
+`web/contentts/`.
 
 | Key | Action |
 | --- | --- |
@@ -306,7 +305,7 @@ into `web/voice-overlay/`.
 | `1` `2` | Review, History |
 | `/` | Edit the revset |
 | `g` | Show jjent and ask it something |
-| `⌘⇧U` (`Ctrl+Shift+U` off a Mac) | Read aloud, or pause and resume |
+| `⌘⇧U` (`Ctrl+Shift+U` off a Mac) | Speech Mode: start, or pause and resume |
 
 ## jjent
 
@@ -473,7 +472,7 @@ into that hunk's `lines`.
 | `src/gate.rs` | Who may use `projj serve`: one-time links, sessions, origin checks |
 | `web/` | Client, embedded in the binary; plain HTML, CSS, and JS |
 | `web/highlight.js` | Syntax tokens for the editor, computed in the page |
-| `web/voice-overlay/` | Reading the page aloud: a copy of voice-overlay, kept by `scripts/vendor-voice-overlay.sh` |
+| `web/contentts/` | Speech Mode's reader: a copy of ContenTTS, kept by `scripts/vendor-contentts.sh` |
 | `desktop/` | The desktop app: Electrobun, with projj in its Rust main process |
 | `spikes/git-engines/` | Not built with projj: gitoxide and grit-lib writing the index, compared with git |
 
@@ -495,11 +494,11 @@ against a scratch root, not against a root someone is reviewing in, and point
 store. With `--web-dir`, the client is read from disk on each request, so
 edits to `web/` show up on reload.
 
-The client has no build step and no dependencies but voice-overlay, a copy
-of whose modules lives in `web/voice-overlay/`. Change voice-overlay in its
-own track (`track/github.com/memoremix-ing/voice-overlay.git`), then bring
-the change in with `scripts/vendor-voice-overlay.sh`, which notes in
-`web/voice-overlay/SOURCE` which change the copy is of. `web/highlight.test.mjs` is not served; it runs
+The client has no build step and no dependencies but ContenTTS, a copy of
+whose modules lives in `web/contentts/`. Change ContenTTS in its own track
+(`track/github.com/memoremix-ing/contentts.git`), then bring the change in
+with `scripts/vendor-contentts.sh`, which notes in `web/contentts/SOURCE`
+which change the copy is of. `web/highlight.test.mjs` is not served; it runs
 under Node's own test runner.
 
 `scripts/ui-test.mjs` builds a scratch root with many changed files, serves it

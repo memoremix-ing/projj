@@ -1,26 +1,26 @@
-// voice-overlay: reads pages in webviews aloud, heavily inspired by Read Aloud
+// ContenTTS: reads pages in webviews aloud, heavily inspired by Read Aloud
 // in Microsoft's Edge web browser. No build step: these files are served as
 // written.
 
-import { VoiceOverlayControls } from "./controls.js";
-import { VoiceOverlay } from "./reader.js";
+import { ContenTTSControls } from "./controls.js";
+import { ContenTTS } from "./reader.js";
 
-export { VoiceOverlay, localStore, MAX_RATE, MIN_RATE } from "./reader.js";
-export { VoiceOverlayControls } from "./controls.js";
+export { ContenTTS, localStore, MAX_RATE, MIN_RATE } from "./reader.js";
+export { ContenTTSControls } from "./controls.js";
 export { WebSpeech } from "./speech.js";
 export * as voices from "./voices.js";
 
 /**
- * Sets up reading aloud for a page in one call: a VoiceOverlay (given the same
+ * Sets up reading aloud for a page in one call: a ContenTTS (given the same
  * options), its controls, added to `container` (default `document.body`),
  * and the shortcut Edge uses, ⌘⇧U on a Mac and Ctrl+Shift+U elsewhere,
  * unless `shortcut: false`.
  *
  * Returns `{ reader, controls, destroy() }`.
  */
-export function mountVoiceOverlay({ container, shortcut = true, ...options } = {}) {
-  const reader = new VoiceOverlay(options);
-  const controls = new VoiceOverlayControls();
+export function mountContenTTS({ container, shortcut = true, ...options } = {}) {
+  const reader = new ContenTTS(options);
+  const controls = new ContenTTSControls();
   controls.reader = reader;
   (container || document.body).append(controls);
 

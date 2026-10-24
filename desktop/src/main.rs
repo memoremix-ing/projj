@@ -226,7 +226,7 @@ fn menu(packaged: bool) -> String {
             { "role": "cut" }, { "role": "copy" }, { "role": "paste" }, { "role": "selectAll" },
             { "type": "separator" },
             // The page reads itself aloud; the shortcut is Edge's.
-            { "label": "Read Aloud", "action": "read-aloud", "accelerator": "CommandOrControl+Shift+U" },
+            { "label": "Speech Mode", "action": "speech-mode", "accelerator": "CommandOrControl+Shift+U" },
         ]},
         { "label": "View", "submenu": view },
         { "label": "Window", "submenu": [{ "role": "minimize" }, { "role": "zoom" }] },
@@ -258,11 +258,11 @@ extern "C" fn menu_clicked(_: u32, action: *const c_char) {
                 let _ = d.core.toggle_webview_devtools(webview);
             }
         }
-        "read-aloud" => {
+        "speech-mode" => {
             if let Some(webview) = webview {
                 let _ = d
                     .core
-                    .send_host_message_to_webview_json(webview, r#"{"type":"projj-read-aloud"}"#);
+                    .send_host_message_to_webview_json(webview, r#"{"type":"projj-speech-mode"}"#);
             }
         }
         _ => {}

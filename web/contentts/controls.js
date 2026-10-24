@@ -1,5 +1,5 @@
-// <voice-overlay-controls>: play and pause, skipping by sentence, reading from
-// the selection, speed, and a voice picker, for a VoiceOverlay given as its
+// <contentts-controls>: play and pause, skipping by sentence, reading from
+// the selection, speed, and a voice picker, for a ContenTTS given as its
 // `reader` property.
 //
 // It shows itself while reading, or always with `persistent`. It floats at
@@ -94,7 +94,7 @@ function rateLabel(rate) {
   return `${rate}×`;
 }
 
-export class VoiceOverlayControls extends HTMLElement {
+export class ContenTTSControls extends HTMLElement {
   #reader = null;
   #parts;
   #listLanguage = null;
@@ -116,7 +116,7 @@ export class VoiceOverlayControls extends HTMLElement {
     const button = (name, text, onclick) => h("button", { type: "button", class: name, title: text, "aria-label": text, onclick }, icon(name));
     const parts = {
       previous: button("previous", "Previous sentence", () => this.#reader?.previous()),
-      play: button("play", "Read aloud", () => this.#reader?.toggle()),
+      play: button("play", "Start Speech Mode", () => this.#reader?.toggle()),
       next: button("next", "Next sentence", () => this.#reader?.next()),
       selection: button("selection", "Read from selection", () => this.#readSelection()),
       status: h("span", { class: "status", role: "status", "aria-live": "polite" }),
@@ -130,7 +130,7 @@ export class VoiceOverlayControls extends HTMLElement {
     parts.selection.addEventListener("mousedown", (event) => event.preventDefault());
     this.#parts = parts;
     shadow.append(
-      h("div", { class: "bar", role: "toolbar", "aria-label": "Read aloud" },
+      h("div", { class: "bar", role: "toolbar", "aria-label": "Speech Mode" },
         parts.previous, parts.play, parts.next, parts.selection, parts.status,
         h("span", { class: "sep" }),
         parts.rate, parts.language, parts.voice, parts.close, parts.hint),
@@ -230,7 +230,7 @@ export class VoiceOverlayControls extends HTMLElement {
     if (state !== "idle") this.#dismissed = false;
 
     const speaking = state === "speaking" || state === "starting";
-    const playLabel = speaking ? "Pause" : state === "paused" ? "Resume" : "Read aloud";
+    const playLabel = speaking ? "Pause" : state === "paused" ? "Resume" : "Start Speech Mode";
     parts.play.replaceChildren(icon(speaking ? "pause" : "play"));
     parts.play.title = playLabel;
     parts.play.setAttribute("aria-label", playLabel);
@@ -254,4 +254,4 @@ export class VoiceOverlayControls extends HTMLElement {
   }
 }
 
-if (!customElements.get("voice-overlay-controls")) customElements.define("voice-overlay-controls", VoiceOverlayControls);
+if (!customElements.get("contentts-controls")) customElements.define("contentts-controls", ContenTTSControls);

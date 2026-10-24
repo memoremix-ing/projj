@@ -1,7 +1,7 @@
 // projj web client. No build step: this file is served as written.
 
 import { grammarFor } from "/highlight.js";
-import { mountVoiceOverlay } from "/voice-overlay/voice-overlay.js";
+import { mountContenTTS } from "/contentts/contentts.js";
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 
@@ -35,8 +35,8 @@ function desktopBridge() {
   const receive = (message) => {
     // The app is quitting: hand over unsaved edits now, as when a tab closes.
     if (message?.type === "projj-flush") return void flushDrafts();
-    // Edit > Read Aloud in the app's menu.
-    if (message?.type === "projj-read-aloud") return void readAloud();
+    // Edit > Speech Mode in the app's menu.
+    if (message?.type === "projj-speech-mode") return void toggleSpeechMode();
     if (message?.type !== "projj" || !waiting.has(message.id)) return;
     waiting.get(message.id)(message);
     waiting.delete(message.id);
@@ -4198,15 +4198,14 @@ async function reload() {
   await loadStatus();
 }
 
-// ----------------------------------------------------------- read aloud
+// ---------------------------------------------------------- speech mode
 //
-// Reads the page aloud with the system's voices, as Edge's Read Aloud does:
-// from the selection, else from what is on screen in the pane last used. The
-// reader is voice-overlay, copied into web/voice-overlay by
-// scripts/vendor-voice-overlay.sh.
+// Reads the page aloud with the system's voices: from the selection, else
+// from what is on screen in the pane last used. The reader is ContenTTS,
+// copied into web/contentts by scripts/vendor-contentts.sh.
 
 /** Never read: the chrome around what is being reviewed, and the parts of a diff that are not its text. */
-const READ_ALOUD_SKIP = [
+const SPEECH_MODE_SKIP = [
   "header.bar", "footer.foot", "#menu", "#review .side", ".history-bar", "#editor", "#toast", "#selection-actions",
   ".no", ".sign", ".eol", ".hunk-head", ".hunk-foot", ".file-head .status", ".file-head .counts", ".file-head .actions",
   // Side by side, unchanged lines show twice; the right side has them.
@@ -4252,28 +4251,28 @@ function readingPane() {
 }
 
 /** Starts reading, or pauses or resumes it. */
-function readAloud() {
+function toggleSpeechMode() {
   if (!reader) return;
   if (reader.state === "idle") reader.start({ within: readingPane() });
   else reader.toggle();
 }
 
-function bindReadAloud() {
-  const mounted = mountVoiceOverlay({
+function bindSpeechMode() {
+  const mounted = mountContenTTS({
     root: document.body,
-    skip: READ_ALOUD_SKIP,
+    skip: SPEECH_MODE_SKIP,
     paragraph: diffParagraph,
-    // In the app, Edit > Read Aloud has the shortcut.
+    // In the app, Edit > Speech Mode has the shortcut.
     shortcut: false,
     // With the other display settings, the same in every projj page.
-    storage: { load: () => setting("read-aloud", null), save: (value) => saveSetting("read-aloud", value) },
+    storage: { load: () => setting("speech-mode", null), save: (value) => saveSetting("speech-mode", value) },
   });
   reader = mounted.reader;
   // In the foot of the page, between its two sets of tools, while reading.
   mounted.controls.setAttribute("placement", "inline");
   $(".foot .foot-tools").after(mounted.controls);
-  const button = $("#read-aloud");
-  button.addEventListener("click", readAloud);
+  const button = $("#speech-mode");
+  button.addEventListener("click", toggleSpeechMode);
   reader.addEventListener("change", () => (button.hidden = reader.state !== "idle"));
   for (const type of ["pointerdown", "wheel", "focusin"]) {
     document.addEventListener(type, (event) => (lastPane = event.target.closest?.(READING_PANES) || lastPane), { capture: true, passive: true });
@@ -4283,7 +4282,7 @@ function bindReadAloud() {
     document.addEventListener("keydown", (event) => {
       if (event.key.toLowerCase() !== "u" || !event.shiftKey || event.altKey || (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey)) return;
       event.preventDefault();
-      readAloud();
+      toggleSpeechMode();
     });
   }
 }
@@ -4683,7 +4682,7 @@ async function start() {
   widthHandle($("#review .side"), "side-width", "Resize the review file list", keepPlace);
   bind();
   bindMenu();
-  bindReadAloud();
+  bindSpeechMode();
   const params = new URLSearchParams(location.search);
   if (params.has("roots")) return enterRoots({ path: params.get("path") });
   state.rootPath = params.get("root");

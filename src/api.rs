@@ -65,25 +65,19 @@ const APP_JS: &str = include_str!("../web/app.js");
 const HIGHLIGHT_JS: &str = include_str!("../web/highlight.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
-/// voice-overlay's modules, which read the page aloud: a copy kept in
-/// `web/voice-overlay/` by `scripts/vendor-voice-overlay.sh`.
-const VOICE_OVERLAY: &[(&str, &str)] = &[
+/// ContenTTS's modules, which read the page aloud: a copy kept in
+/// `web/contentts/` by `scripts/vendor-contentts.sh`.
+const CONTENTTS: &[(&str, &str)] = &[
+    ("collect.js", include_str!("../web/contentts/collect.js")),
     (
-        "collect.js",
-        include_str!("../web/voice-overlay/collect.js"),
+        "contentts.js",
+        include_str!("../web/contentts/contentts.js"),
     ),
-    (
-        "controls.js",
-        include_str!("../web/voice-overlay/controls.js"),
-    ),
-    ("reader.js", include_str!("../web/voice-overlay/reader.js")),
-    ("speech.js", include_str!("../web/voice-overlay/speech.js")),
-    ("text.js", include_str!("../web/voice-overlay/text.js")),
-    (
-        "voice-overlay.js",
-        include_str!("../web/voice-overlay/voice-overlay.js"),
-    ),
-    ("voices.js", include_str!("../web/voice-overlay/voices.js")),
+    ("controls.js", include_str!("../web/contentts/controls.js")),
+    ("reader.js", include_str!("../web/contentts/reader.js")),
+    ("speech.js", include_str!("../web/contentts/speech.js")),
+    ("text.js", include_str!("../web/contentts/text.js")),
+    ("voices.js", include_str!("../web/contentts/voices.js")),
 ];
 
 /// Discovery asks git to walk the root, so its answer is reused for a moment
@@ -331,7 +325,7 @@ pub fn router(app: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/highlight.js", get(highlight_js))
         .route("/style.css", get(style_css))
-        .route("/voice-overlay/{name}", get(voice_overlay_js))
+        .route("/contentts/{name}", get(contentts_js))
         .route("/api/start", get(get_start))
         .route("/api/roots", get(roots_search))
         .route("/api/roots/inspect", get(roots_inspect))
@@ -452,16 +446,16 @@ async fn style_css(State(app): State<AppState>) -> Response {
     asset(&app, "style.css", STYLE_CSS, "text/css; charset=utf-8").await
 }
 
-/// Only the modules named in `VOICE_OVERLAY`, so the name reaches nothing else.
-async fn voice_overlay_js(
+/// Only the modules named in `CONTENTTS`, so the name reaches nothing else.
+async fn contentts_js(
     State(app): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
-    match VOICE_OVERLAY.iter().find(|(known, _)| *known == name) {
+    match CONTENTTS.iter().find(|(known, _)| *known == name) {
         Some((known, embedded)) => {
             asset(
                 &app,
-                &format!("voice-overlay/{known}"),
+                &format!("contentts/{known}"),
                 embedded,
                 "text/javascript; charset=utf-8",
             )
@@ -1317,24 +1311,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serves_voice_overlay_modules_by_name_only() {
+    async fn serves_contentts_modules_by_name_only() {
         let dir = tempfile::tempdir().unwrap();
         let local = local(dir.path());
         let (status, body) = local
-            .call(
-                "GET",
-                "/voice-overlay/voice-overlay.js",
-                None,
-                String::new(),
-            )
+            .call("GET", "/contentts/contentts.js", None, String::new())
             .await;
         assert_eq!(status, 200);
-        assert!(body.contains("export function mountVoiceOverlay"));
+        assert!(body.contains("export function mountContenTTS"));
         for uri in [
-            "/voice-overlay/nope.js",
-            "/voice-overlay/SOURCE",
-            "/voice-overlay/..%2Fapp.js",
-            "/voice-overlay/%2E%2E%2Fapp.js",
+            "/contentts/nope.js",
+            "/contentts/SOURCE",
+            "/contentts/..%2Fapp.js",
+            "/contentts/%2E%2E%2Fapp.js",
         ] {
             assert_eq!(
                 local.call("GET", uri, None, String::new()).await.0,
@@ -1344,18 +1333,18 @@ mod tests {
         }
     }
 
-    /// A module added to voice-overlay must be served, and copied into the app
+    /// A module added to ContenTTS must be served, and copied into the app
     /// by desktop/electrobun.config.ts.
     #[test]
-    fn voice_overlay_lists_every_vendored_module() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/voice-overlay");
+    fn contentts_lists_every_vendored_module() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/contentts");
         let mut vendored: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name.ends_with(".js"))
             .collect();
         vendored.sort();
-        let mut served: Vec<&str> = VOICE_OVERLAY.iter().map(|(name, _)| *name).collect();
+        let mut served: Vec<&str> = CONTENTTS.iter().map(|(name, _)| *name).collect();
         served.sort();
         assert_eq!(vendored, served);
         let config = std::fs::read_to_string(

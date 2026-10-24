@@ -1,12 +1,12 @@
 import type { ElectrobunConfig } from "electrobun";
 
 // The page is projj's own web client, unchanged: `web` links to ../web,
-// since Electrobun only copies files from inside the project. voice-overlay's
-// modules are read by the page from /voice-overlay/.
+// since Electrobun only copies files from inside the project. ContenTTS's
+// modules are read by the page from /contentts/.
 const page = Object.fromEntries(
 	[
 		"index.html", "app.js", "highlight.js", "style.css",
-		...["collect", "controls", "reader", "speech", "text", "voice-overlay", "voices"].map((name) => `voice-overlay/${name}.js`),
+		...["collect", "contentts", "controls", "reader", "speech", "text", "voices"].map((name) => `contentts/${name}.js`),
 	].map((name) => [`web/${name}`, `views/projj/${name}`]),
 );
 
@@ -21,7 +21,7 @@ const engine = {
 	defaultRenderer: "cef",
 	chromiumFlags: {
 		"remote-debugging-port": process.env.PROJJ_CEF_DEBUG_PORT || false,
-		// Edit > Read Aloud starts speech from the app's menu, not from a click
+		// Edit > Speech Mode starts speech from the app's menu, not from a click
 		// in the page, and Chromium speaks unasked only where media may play
 		// unasked. The page has no media to play.
 		"autoplay-policy": "no-user-gesture-required",
