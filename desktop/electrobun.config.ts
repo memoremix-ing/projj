@@ -1,7 +1,7 @@
 import type { ElectrobunConfig } from "electrobun";
 
 // The page is projj's own web client, unchanged: `web` links to ../web,
-// since Electrobun only copies files from inside the project. ContenTTS's
+// since Electrobun only copies files from inside the project. contenTTS's
 // modules are read by the page from /contentts/.
 const page = Object.fromEntries(
 	[

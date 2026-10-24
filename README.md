@@ -291,7 +291,7 @@ pause, skip by sentence, read from the selection (select further on and press
 it to move there), change the speed, and pick the voice. On a Mac,
 the Premium voices (free in System Settings > Accessibility > Spoken
 Content) sound far better than those it starts with. The reader is
-ContenTTS (`track/github.com/memoremix-ing/contentts.git`), copied into
+contenTTS (`track/github.com/memoremix-ing/contenTTS.git`), copied into
 `web/contentts/`.
 
 | Key | Action |
@@ -472,7 +472,7 @@ into that hunk's `lines`.
 | `src/gate.rs` | Who may use `projj serve`: one-time links, sessions, origin checks |
 | `web/` | Client, embedded in the binary; plain HTML, CSS, and JS |
 | `web/highlight.js` | Syntax tokens for the editor, computed in the page |
-| `web/contentts/` | Speech Mode's reader: a copy of ContenTTS, kept by `scripts/vendor-contentts.sh` |
+| `web/contentts/` | Speech Mode's reader: a copy of contenTTS, kept by `scripts/vendor-contentts.sh` |
 | `desktop/` | The desktop app: Electrobun, with projj in its Rust main process |
 | `spikes/git-engines/` | Not built with projj: gitoxide and grit-lib writing the index, compared with git |
 
@@ -494,9 +494,9 @@ against a scratch root, not against a root someone is reviewing in, and point
 store. With `--web-dir`, the client is read from disk on each request, so
 edits to `web/` show up on reload.
 
-The client has no build step and no dependencies but ContenTTS, a copy of
-whose modules lives in `web/contentts/`. Change ContenTTS in its own track
-(`track/github.com/memoremix-ing/contentts.git`), then bring the change in
+The client has no build step and no dependencies but contenTTS, a copy of
+whose modules lives in `web/contentts/`. Change contenTTS in its own track
+(`track/github.com/memoremix-ing/contenTTS.git`), then bring the change in
 with `scripts/vendor-contentts.sh`, which notes in `web/contentts/SOURCE`
 which change the copy is of. `web/highlight.test.mjs` is not served; it runs
 under Node's own test runner.

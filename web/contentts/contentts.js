@@ -1,4 +1,4 @@
-// ContenTTS: reads pages in webviews aloud, heavily inspired by Read Aloud
+// contenTTS: reads pages in webviews aloud, heavily inspired by Read Aloud
 // in Microsoft's Edge web browser. No build step: these files are served as
 // written.
 

@@ -4201,7 +4201,7 @@ async function reload() {
 // ---------------------------------------------------------- speech mode
 //
 // Reads the page aloud with the system's voices: from the selection, else
-// from what is on screen in the pane last used. The reader is ContenTTS,
+// from what is on screen in the pane last used. The reader is contenTTS,
 // copied into web/contentts by scripts/vendor-contentts.sh.
 
 /** Never read: the chrome around what is being reviewed, and the parts of a diff that are not its text. */

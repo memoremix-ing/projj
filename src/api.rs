@@ -65,7 +65,7 @@ const APP_JS: &str = include_str!("../web/app.js");
 const HIGHLIGHT_JS: &str = include_str!("../web/highlight.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
-/// ContenTTS's modules, which read the page aloud: a copy kept in
+/// contenTTS's modules, which read the page aloud: a copy kept in
 /// `web/contentts/` by `scripts/vendor-contentts.sh`.
 const CONTENTTS: &[(&str, &str)] = &[
     ("collect.js", include_str!("../web/contentts/collect.js")),
@@ -1333,7 +1333,7 @@ mod tests {
         }
     }
 
-    /// A module added to ContenTTS must be served, and copied into the app
+    /// A module added to contenTTS must be served, and copied into the app
     /// by desktop/electrobun.config.ts.
     #[test]
     fn contentts_lists_every_vendored_module() {

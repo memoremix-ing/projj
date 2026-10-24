@@ -1,3 +1,3 @@
-A copy of ContenTTS's src/, made by scripts/vendor-contentts.sh from
-klqsorwpkvyq e640fcd7f9d5 Rename to ContenTTS (contentts), and call the controls Speech Mode
-Change it in ContenTTS (track/github.com/memoremix-ing/contentts.git), not here.
+A copy of contenTTS's src/, made by scripts/vendor-contentts.sh from
+nyrttulotprs 82ddebe8d3f1 contenTTS, as the repository is named: in the README, AGENTS.md, demo and entry module, and the track's path
+Change it in contenTTS (track/github.com/memoremix-ing/contenTTS.git), not here.

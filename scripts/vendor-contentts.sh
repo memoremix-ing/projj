@@ -1,15 +1,15 @@
 #!/bin/bash
-# Copies ContenTTS, which reads the page aloud, into web/contentts/: from
+# Copies contenTTS, which reads the page aloud, into web/contentts/: from
 # its track beside this one, or from the workspace named.
 #
 #   vendor-contentts.sh [CONTENTTS_WORKSPACE]
 #
 # projj keeps a copy so that it builds with nothing beside it. Change
-# ContenTTS in its own track, then run this to bring the change in.
+# contenTTS in its own track, then run this to bring the change in.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
-from="$(cd "${1:-$here/../../contentts.git/sts-0}" && pwd)"
-[ -f "$from/src/contentts.js" ] || { echo "vendor-contentts.sh: no ContenTTS in $from" >&2; exit 1; }
+from="$(cd "${1:-$here/../../contenTTS.git/sts-0}" && pwd)"
+[ -f "$from/src/contentts.js" ] || { echo "vendor-contentts.sh: no contenTTS in $from" >&2; exit 1; }
 
 dest="$here/web/contentts"
 rm -rf "$dest"
@@ -22,8 +22,8 @@ change="$(jj -R "$from" log --no-graph -r 'heads(::@ & ~empty())' \
   -T 'change_id.short(12) ++ " " ++ commit_id.short(12) ++ " " ++ if(current_working_copy, "(not yet committed) ") ++ description.first_line()' \
   2>/dev/null || echo "unknown")"
 cat > "$dest/SOURCE" <<EOF
-A copy of ContenTTS's src/, made by scripts/vendor-contentts.sh from
+A copy of contenTTS's src/, made by scripts/vendor-contentts.sh from
 $change
-Change it in ContenTTS (track/github.com/memoremix-ing/contentts.git), not here.
+Change it in contenTTS (track/github.com/memoremix-ing/contenTTS.git), not here.
 EOF
-echo "copied ContenTTS ($change) into web/contentts/"
+echo "copied contenTTS ($change) into web/contentts/"
