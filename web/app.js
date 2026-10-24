@@ -1,7 +1,7 @@
 // projj web client. No build step: this file is served as written.
 
 import { grammarFor } from "/highlight.js";
-import { mountReadAloud } from "/read-aloud/read-aloud.js";
+import { mountVoiceOverlay } from "/voice-overlay/voice-overlay.js";
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 
@@ -4202,8 +4202,8 @@ async function reload() {
 //
 // Reads the page aloud with the system's voices, as Edge's Read Aloud does:
 // from the selection, else from what is on screen in the pane last used. The
-// reader is read-aloud, copied into web/read-aloud by
-// scripts/vendor-read-aloud.sh.
+// reader is voice-overlay, copied into web/voice-overlay by
+// scripts/vendor-voice-overlay.sh.
 
 /** Never read: the chrome around what is being reviewed, and the parts of a diff that are not its text. */
 const READ_ALOUD_SKIP = [
@@ -4259,7 +4259,7 @@ function readAloud() {
 }
 
 function bindReadAloud() {
-  const mounted = mountReadAloud({
+  const mounted = mountVoiceOverlay({
     root: document.body,
     skip: READ_ALOUD_SKIP,
     paragraph: diffParagraph,

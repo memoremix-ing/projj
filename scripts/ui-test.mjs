@@ -485,7 +485,7 @@ const FAKE_SPEECH = `{
 }`;
 
 /** Clicks a control of the reader's, inside its shadow root. */
-const readerControl = (name) => `document.querySelector("read-aloud-controls").shadowRoot.querySelector(${JSON.stringify(name)})`;
+const readerControl = (name) => `document.querySelector("voice-overlay-controls").shadowRoot.querySelector(${JSON.stringify(name)})`;
 
 /** Opens the guide on a conversation started afresh. */
 async function openGuide(page, site) {
@@ -1026,7 +1026,7 @@ const TESTS = {
     `);
     await page.click("#read-aloud");
     await page.waitFor(`window.spoken.length >= 3`);
-    const shown = await page.run(`return { controls: !document.querySelector("read-aloud-controls").hidden, button: !document.querySelector("#read-aloud").hidden };`);
+    const shown = await page.run(`return { controls: !document.querySelector("voice-overlay-controls").hidden, button: !document.querySelector("#read-aloud").hidden };`);
     if (!shown.controls || shown.button) fail(`while reading, the controls were ${shown.controls ? "shown" : "hidden"} and the button ${shown.button ? "shown" : "hidden"}`);
     // Each line's own words, without numbers or signs: the old, then the new, then on.
     const spoken = await page.run(`return window.spoken.slice(0, 3);`);
@@ -1036,7 +1036,7 @@ const TESTS = {
       "Paragraph 6 explains how widget number 6 is assembled and tested.",
     ];
     if (JSON.stringify(spoken) !== JSON.stringify(expected)) fail(`read ${JSON.stringify(spoken)}`);
-    if (!(await page.run(`return CSS.highlights.has("read-aloud-word");`))) fail("no word is highlighted");
+    if (!(await page.run(`return CSS.highlights.has("voice-overlay-word");`))) fail("no word is highlighted");
 
     // Selecting further on while reading, then pressing Read from selection, moves reading there.
     await page.run(`getSelection().removeAllRanges();`);
@@ -1069,7 +1069,7 @@ const TESTS = {
     if (settings["read-aloud"]?.rate !== 1.5) fail(`the settings were ${JSON.stringify(settings)}`);
 
     await page.run(`${readerControl(".close")}.click();`);
-    await page.waitFor(`document.querySelector("read-aloud-controls").hidden && !document.querySelector("#read-aloud").hidden`);
+    await page.waitFor(`document.querySelector("voice-overlay-controls").hidden && !document.querySelector("#read-aloud").hidden`);
     if (await page.run(`return CSS.highlights.size;`)) fail("highlights were left behind");
 
     // Without a selection, from what is on screen in the diffs.
@@ -1078,7 +1078,7 @@ const TESTS = {
     await page.waitFor(`window.spoken.length >= 1`);
     const first = await page.run(`
       const stream = document.querySelector("#stream").getBoundingClientRect();
-      const range = [...CSS.highlights.get("read-aloud-sentence")][0];
+      const range = [...CSS.highlights.get("voice-overlay-sentence")][0];
       const r = range.getBoundingClientRect();
       return { text: window.spoken[0], inStream: document.querySelector("#stream").contains(range.startContainer), onScreen: r.bottom > stream.top && r.top < stream.bottom };
     `);

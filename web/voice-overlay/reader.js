@@ -11,13 +11,13 @@ export const MAX_RATE = 3;
 /** How long after the reader scrolls the page by hand the page is left where they put it. */
 const HOLD_AFTER_SCROLL = 4000;
 
-const SENTENCE = "read-aloud-sentence";
-const WORD = "read-aloud-word";
+const SENTENCE = "voice-overlay-sentence";
+const WORD = "voice-overlay-word";
 
 // Apps can recolor these with the custom properties.
 const SHEET = `
-::highlight(${SENTENCE}) { background-color: var(--read-aloud-sentence, rgb(255 210 70 / 0.22)); }
-::highlight(${WORD}) { background-color: var(--read-aloud-word, rgb(255 200 40 / 0.9)); color: var(--read-aloud-word-text, #111); }
+::highlight(${SENTENCE}) { background-color: var(--voice-overlay-sentence, rgb(255 210 70 / 0.22)); }
+::highlight(${WORD}) { background-color: var(--voice-overlay-word, rgb(255 200 40 / 0.9)); color: var(--voice-overlay-word-text, #111); }
 `;
 
 const SCROLL_KEYS = new Set(["PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", " "]);
@@ -86,7 +86,7 @@ function addStyles(document) {
  * Fires `change` whenever `state`, the sentence, the voice or the speed
  * changes, and `voices` when the system's voices do.
  */
-export class ReadAloud extends EventTarget {
+export class VoiceOverlay extends EventTarget {
   /** "idle", "starting" (waiting on the engine), "speaking" or "paused". */
   state = "idle";
   /** Why reading last stopped short: "unavailable", "empty", "changed", or the engine's error code. */
@@ -109,7 +109,7 @@ export class ReadAloud extends EventTarget {
   #heldUntil = 0;
   #listeners = [];
 
-  constructor({ root = document.body, lang, skip, paragraph, engine = new WebSpeech(), storage = localStore("read-aloud"), follow = true } = {}) {
+  constructor({ root = document.body, lang, skip, paragraph, engine = new WebSpeech(), storage = localStore("voice-overlay"), follow = true } = {}) {
     super();
     this.#root = root;
     this.#lang = lang || root.closest("[lang]")?.lang || navigator.language || "en";

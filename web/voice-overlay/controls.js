@@ -1,5 +1,5 @@
-// <read-aloud-controls>: play and pause, skipping by sentence, reading from
-// the selection, speed, and a voice picker, for a ReadAloud given as its
+// <voice-overlay-controls>: play and pause, skipping by sentence, reading from
+// the selection, speed, and a voice picker, for a VoiceOverlay given as its
 // `reader` property.
 //
 // It shows itself while reading, or always with `persistent`. It floats at
@@ -94,7 +94,7 @@ function rateLabel(rate) {
   return `${rate}×`;
 }
 
-export class ReadAloudControls extends HTMLElement {
+export class VoiceOverlayControls extends HTMLElement {
   #reader = null;
   #parts;
   #listLanguage = null;
@@ -254,4 +254,4 @@ export class ReadAloudControls extends HTMLElement {
   }
 }
 
-if (!customElements.get("read-aloud-controls")) customElements.define("read-aloud-controls", ReadAloudControls);
+if (!customElements.get("voice-overlay-controls")) customElements.define("voice-overlay-controls", VoiceOverlayControls);

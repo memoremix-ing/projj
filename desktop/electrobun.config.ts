@@ -1,12 +1,12 @@
 import type { ElectrobunConfig } from "electrobun";
 
 // The page is projj's own web client, unchanged: `web` links to ../web,
-// since Electrobun only copies files from inside the project. read-aloud's
-// modules are read by the page from /read-aloud/.
+// since Electrobun only copies files from inside the project. voice-overlay's
+// modules are read by the page from /voice-overlay/.
 const page = Object.fromEntries(
 	[
 		"index.html", "app.js", "highlight.js", "style.css",
-		...["collect", "controls", "read-aloud", "reader", "speech", "text", "voices"].map((name) => `read-aloud/${name}.js`),
+		...["collect", "controls", "reader", "speech", "text", "voice-overlay", "voices"].map((name) => `voice-overlay/${name}.js`),
 	].map((name) => [`web/${name}`, `views/projj/${name}`]),
 );
 

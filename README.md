@@ -292,8 +292,8 @@ pause, skip by sentence, read from the selection (select further on and press
 it to move there), change the speed, and pick the voice. On a Mac,
 the Premium voices (free in System Settings > Accessibility > Spoken
 Content) sound far better than those it starts with. The reader is
-read-aloud (`track/github.com/memoremix-ing/read-aloud.git`), copied into
-`web/read-aloud/`.
+voice-overlay (`track/github.com/memoremix-ing/voice-overlay.git`), copied
+into `web/voice-overlay/`.
 
 | Key | Action |
 | --- | --- |
@@ -473,7 +473,7 @@ into that hunk's `lines`.
 | `src/gate.rs` | Who may use `projj serve`: one-time links, sessions, origin checks |
 | `web/` | Client, embedded in the binary; plain HTML, CSS, and JS |
 | `web/highlight.js` | Syntax tokens for the editor, computed in the page |
-| `web/read-aloud/` | Reading the page aloud: a copy of read-aloud, kept by `scripts/vendor-read-aloud.sh` |
+| `web/voice-overlay/` | Reading the page aloud: a copy of voice-overlay, kept by `scripts/vendor-voice-overlay.sh` |
 | `desktop/` | The desktop app: Electrobun, with projj in its Rust main process |
 | `spikes/git-engines/` | Not built with projj: gitoxide and grit-lib writing the index, compared with git |
 
@@ -495,11 +495,11 @@ against a scratch root, not against a root someone is reviewing in, and point
 store. With `--web-dir`, the client is read from disk on each request, so
 edits to `web/` show up on reload.
 
-The client has no build step and no dependencies but read-aloud, a copy of
-whose modules lives in `web/read-aloud/`. Change read-aloud in its own track
-(`track/github.com/memoremix-ing/read-aloud.git`), then bring the change in
-with `scripts/vendor-read-aloud.sh`, which notes in `web/read-aloud/SOURCE`
-which change the copy is of. `web/highlight.test.mjs` is not served; it runs
+The client has no build step and no dependencies but voice-overlay, a copy
+of whose modules lives in `web/voice-overlay/`. Change voice-overlay in its
+own track (`track/github.com/memoremix-ing/voice-overlay.git`), then bring
+the change in with `scripts/vendor-voice-overlay.sh`, which notes in
+`web/voice-overlay/SOURCE` which change the copy is of. `web/highlight.test.mjs` is not served; it runs
 under Node's own test runner.
 
 `scripts/ui-test.mjs` builds a scratch root with many changed files, serves it

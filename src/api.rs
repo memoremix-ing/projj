@@ -65,19 +65,25 @@ const APP_JS: &str = include_str!("../web/app.js");
 const HIGHLIGHT_JS: &str = include_str!("../web/highlight.js");
 const STYLE_CSS: &str = include_str!("../web/style.css");
 
-/// read-aloud's modules, which read the page aloud: a copy kept in
-/// `web/read-aloud/` by `scripts/vendor-read-aloud.sh`.
-const READ_ALOUD: &[(&str, &str)] = &[
-    ("collect.js", include_str!("../web/read-aloud/collect.js")),
-    ("controls.js", include_str!("../web/read-aloud/controls.js")),
+/// voice-overlay's modules, which read the page aloud: a copy kept in
+/// `web/voice-overlay/` by `scripts/vendor-voice-overlay.sh`.
+const VOICE_OVERLAY: &[(&str, &str)] = &[
     (
-        "read-aloud.js",
-        include_str!("../web/read-aloud/read-aloud.js"),
+        "collect.js",
+        include_str!("../web/voice-overlay/collect.js"),
     ),
-    ("reader.js", include_str!("../web/read-aloud/reader.js")),
-    ("speech.js", include_str!("../web/read-aloud/speech.js")),
-    ("text.js", include_str!("../web/read-aloud/text.js")),
-    ("voices.js", include_str!("../web/read-aloud/voices.js")),
+    (
+        "controls.js",
+        include_str!("../web/voice-overlay/controls.js"),
+    ),
+    ("reader.js", include_str!("../web/voice-overlay/reader.js")),
+    ("speech.js", include_str!("../web/voice-overlay/speech.js")),
+    ("text.js", include_str!("../web/voice-overlay/text.js")),
+    (
+        "voice-overlay.js",
+        include_str!("../web/voice-overlay/voice-overlay.js"),
+    ),
+    ("voices.js", include_str!("../web/voice-overlay/voices.js")),
 ];
 
 /// Discovery asks git to walk the root, so its answer is reused for a moment
@@ -325,7 +331,7 @@ pub fn router(app: AppState) -> Router {
         .route("/app.js", get(app_js))
         .route("/highlight.js", get(highlight_js))
         .route("/style.css", get(style_css))
-        .route("/read-aloud/{name}", get(read_aloud_js))
+        .route("/voice-overlay/{name}", get(voice_overlay_js))
         .route("/api/start", get(get_start))
         .route("/api/roots", get(roots_search))
         .route("/api/roots/inspect", get(roots_inspect))
@@ -446,16 +452,16 @@ async fn style_css(State(app): State<AppState>) -> Response {
     asset(&app, "style.css", STYLE_CSS, "text/css; charset=utf-8").await
 }
 
-/// Only the modules named in `READ_ALOUD`, so the name reaches nothing else.
-async fn read_aloud_js(
+/// Only the modules named in `VOICE_OVERLAY`, so the name reaches nothing else.
+async fn voice_overlay_js(
     State(app): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Response {
-    match READ_ALOUD.iter().find(|(known, _)| *known == name) {
+    match VOICE_OVERLAY.iter().find(|(known, _)| *known == name) {
         Some((known, embedded)) => {
             asset(
                 &app,
-                &format!("read-aloud/{known}"),
+                &format!("voice-overlay/{known}"),
                 embedded,
                 "text/javascript; charset=utf-8",
             )
@@ -1311,19 +1317,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn serves_read_aloud_modules_by_name_only() {
+    async fn serves_voice_overlay_modules_by_name_only() {
         let dir = tempfile::tempdir().unwrap();
         let local = local(dir.path());
         let (status, body) = local
-            .call("GET", "/read-aloud/read-aloud.js", None, String::new())
+            .call(
+                "GET",
+                "/voice-overlay/voice-overlay.js",
+                None,
+                String::new(),
+            )
             .await;
         assert_eq!(status, 200);
-        assert!(body.contains("export function mountReadAloud"));
+        assert!(body.contains("export function mountVoiceOverlay"));
         for uri in [
-            "/read-aloud/nope.js",
-            "/read-aloud/SOURCE",
-            "/read-aloud/..%2Fapp.js",
-            "/read-aloud/%2E%2E%2Fapp.js",
+            "/voice-overlay/nope.js",
+            "/voice-overlay/SOURCE",
+            "/voice-overlay/..%2Fapp.js",
+            "/voice-overlay/%2E%2E%2Fapp.js",
         ] {
             assert_eq!(
                 local.call("GET", uri, None, String::new()).await.0,
@@ -1333,18 +1344,19 @@ mod tests {
         }
     }
 
-    /// A module added to read-aloud must be served, and copied into the app
+    /// A module added to voice-overlay must be served, and copied into the app
     /// by desktop/electrobun.config.ts.
     #[test]
-    fn read_aloud_lists_every_vendored_module() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/read-aloud");
+    fn voice_overlay_lists_every_vendored_module() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("web/voice-overlay");
         let mut vendored: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name.ends_with(".js"))
             .collect();
         vendored.sort();
-        let served: Vec<&str> = READ_ALOUD.iter().map(|(name, _)| *name).collect();
+        let mut served: Vec<&str> = VOICE_OVERLAY.iter().map(|(name, _)| *name).collect();
+        served.sort();
         assert_eq!(vendored, served);
         let config = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("desktop/electrobun.config.ts"),
