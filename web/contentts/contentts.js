@@ -4,21 +4,27 @@
 
 import { ContenTTSControls } from "./controls.js";
 import { ContenTTS } from "./reader.js";
+import { matchesShortcut, shortcutKey } from "./shortcut.js";
 
 export { ContenTTS, localStore, MAX_RATE, MIN_RATE } from "./reader.js";
 export { ContenTTSControls } from "./controls.js";
+export { DEFAULT_KEY, accelerator, matchesShortcut, shortcutKey, shortcutLabel } from "./shortcut.js";
 export { WebSpeech } from "./speech.js";
 export * as voices from "./voices.js";
 
 /**
  * Sets up reading aloud for a page in one call: a ContenTTS (given the same
  * options), its controls, added to `container` (default `document.body`),
- * and the shortcut Edge uses, ⌘⇧U on a Mac and Ctrl+Shift+U elsewhere,
- * unless `shortcut: false`.
+ * and a shortcut that starts, pauses and resumes: ⌘⇧ and `shortcut` on a
+ * Mac, Ctrl+Shift and `shortcut` elsewhere. `shortcut` is a letter, `true`
+ * for K, or `false` for none (see shortcut.js).
  *
- * Returns `{ reader, controls, destroy() }`.
+ * Returns `{ reader, controls, shortcut, destroy() }`, `shortcut` being the
+ * letter in use, or `null`.
  */
 export function mountContenTTS({ container, shortcut = true, ...options } = {}) {
+  // Before anything is made, so that a bad shortcut leaves nothing behind.
+  const key = shortcutKey(shortcut);
   const reader = new ContenTTS(options);
   const controls = new ContenTTSControls();
   controls.reader = reader;
@@ -26,16 +32,16 @@ export function mountContenTTS({ container, shortcut = true, ...options } = {}) 
 
   const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform || "");
   const onKey = (event) => {
-    if (event.key.toLowerCase() !== "u" || !event.shiftKey || event.altKey) return;
-    if (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey) return;
+    if (!matchesShortcut(event, key, mac)) return;
     event.preventDefault();
     reader.toggle();
   };
-  if (shortcut) addEventListener("keydown", onKey);
+  if (key) addEventListener("keydown", onKey);
 
   return {
     reader,
     controls,
+    shortcut: key,
     destroy() {
       removeEventListener("keydown", onKey);
       reader.destroy();

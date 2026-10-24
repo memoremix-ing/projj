@@ -1084,6 +1084,26 @@ const TESTS = {
     `);
     if (!first.inStream || !first.onScreen) fail(`started at ${JSON.stringify(first)}`);
     await page.run(`${readerControl(".close")}.click();`);
+    await page.waitFor(`document.querySelector("contentts-controls").hidden`);
+
+    // ⌘⇧K (Ctrl+Shift+K off a Mac) starts, then pauses; the old ⌘⇧U does nothing.
+    const mac = await page.run(`return /mac/i.test(navigator.userAgentData?.platform || navigator.platform);`);
+    const chord = async (key) => {
+      // CDP's modifier bits: Ctrl 2, Meta 4, Shift 8.
+      const modifiers = (mac ? 4 : 2) | 8;
+      for (const type of ["keyDown", "keyUp"]) {
+        await page.send("Input.dispatchKeyEvent", { type, key, code: `Key${key}`, windowsVirtualKeyCode: key.charCodeAt(0), modifiers });
+      }
+    };
+    await page.run(`window.spoken.length = 0;`);
+    await chord("U");
+    await sleep(300);
+    if (await page.run(`return window.spoken.length;`)) fail("the old shortcut, U, still starts reading");
+    await chord("K");
+    await page.waitFor(`window.spoken.length >= 1`);
+    await chord("K");
+    await page.waitFor(`${readerControl("button.play")}.title === "Resume"`);
+    await page.run(`${readerControl(".close")}.click();`);
   },
 };
 

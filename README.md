@@ -280,7 +280,7 @@ correctly.
 log. Shift-click a change, or use "Compare from here", to diff between two
 changes.
 
-**Speech Mode** (at the foot of the page, ⌘⇧U, or Edit > Speech Mode in
+**Speech Mode** (at the foot of the page, ⌘⇧K, or Edit > Speech Mode in
 the app) reads the page to you with the system's voices: from the
 selection, else from what is on screen where you last clicked or scrolled, highlighting each sentence and word and keeping them in view.
 Diffs are read without their numbers and signs, removed lines included. In a
@@ -305,7 +305,7 @@ contenTTS (`track/github.com/memoremix-ing/contenTTS.git`), copied into
 | `1` `2` | Review, History |
 | `/` | Edit the revset |
 | `g` | Show jjent and ask it something |
-| `⌘⇧U` (`Ctrl+Shift+U` off a Mac) | Speech Mode: start, or pause and resume |
+| `⌘⇧K` (`Ctrl+Shift+K` off a Mac) | Speech Mode: start, or pause and resume |
 
 ## jjent
 

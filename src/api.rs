@@ -75,6 +75,7 @@ const CONTENTTS: &[(&str, &str)] = &[
     ),
     ("controls.js", include_str!("../web/contentts/controls.js")),
     ("reader.js", include_str!("../web/contentts/reader.js")),
+    ("shortcut.js", include_str!("../web/contentts/shortcut.js")),
     ("speech.js", include_str!("../web/contentts/speech.js")),
     ("text.js", include_str!("../web/contentts/text.js")),
     ("voices.js", include_str!("../web/contentts/voices.js")),
@@ -1357,6 +1358,56 @@ mod tests {
                 config.contains(&format!("\"{stem}\"")),
                 "desktop/electrobun.config.ts does not copy {name}"
             );
+        }
+    }
+
+    /// Speech Mode's shortcut is contenTTS's default, and every place that
+    /// names it says the same: the app's menu, the page's help, the READMEs.
+    #[test]
+    fn speech_mode_shortcut_is_the_same_everywhere() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+        let shortcut = read("web/contentts/shortcut.js");
+        let key = shortcut
+            .split("export const DEFAULT_KEY = \"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("web/contentts/shortcut.js exports DEFAULT_KEY");
+        assert!(
+            key.len() == 1 && key.chars().all(|c| c.is_ascii_uppercase()),
+            "{key}"
+        );
+        let mac = format!("⌘⇧{key}");
+        let other = format!("Ctrl+Shift+{key}");
+        for (path, expected) in [
+            (
+                "desktop/src/main.rs",
+                vec![format!("\"accelerator\": \"CommandOrControl+Shift+{key}\"")],
+            ),
+            (
+                "web/index.html",
+                vec![
+                    format!("({mac})"),
+                    format!("<kbd>{mac}</kbd>"),
+                    format!("({other} off a Mac)"),
+                ],
+            ),
+            (
+                "README.md",
+                vec![
+                    format!("page, {mac},"),
+                    format!("| `{mac}` (`{other}` off a Mac) |"),
+                ],
+            ),
+            (
+                "desktop/README.md",
+                vec![format!("Edit > Speech Mode ({mac})")],
+            ),
+        ] {
+            let text = read(path);
+            for want in expected {
+                assert!(text.contains(&want), "{path} should say {want}");
+            }
         }
     }
 

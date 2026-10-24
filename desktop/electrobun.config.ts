@@ -6,7 +6,7 @@ import type { ElectrobunConfig } from "electrobun";
 const page = Object.fromEntries(
 	[
 		"index.html", "app.js", "highlight.js", "style.css",
-		...["collect", "contentts", "controls", "reader", "speech", "text", "voices"].map((name) => `contentts/${name}.js`),
+		...["collect", "contentts", "controls", "reader", "shortcut", "speech", "text", "voices"].map((name) => `contentts/${name}.js`),
 	].map((name) => [`web/${name}`, `views/projj/${name}`]),
 );
 

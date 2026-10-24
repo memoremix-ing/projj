@@ -1,7 +1,7 @@
 // projj web client. No build step: this file is served as written.
 
 import { grammarFor } from "/highlight.js";
-import { mountContenTTS } from "/contentts/contentts.js";
+import { DEFAULT_KEY, matchesShortcut, mountContenTTS } from "/contentts/contentts.js";
 
 const $ = (selector, parent = document) => parent.querySelector(selector);
 
@@ -4278,9 +4278,10 @@ function bindSpeechMode() {
     document.addEventListener(type, (event) => (lastPane = event.target.closest?.(READING_PANES) || lastPane), { capture: true, passive: true });
   }
   if (!desktop) {
+    // contenTTS's own, ⌘⇧K; the app's menu has the same (a test keeps them one).
     const mac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform);
     document.addEventListener("keydown", (event) => {
-      if (event.key.toLowerCase() !== "u" || !event.shiftKey || event.altKey || (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey)) return;
+      if (!matchesShortcut(event, DEFAULT_KEY, mac)) return;
       event.preventDefault();
       toggleSpeechMode();
     });

@@ -225,8 +225,8 @@ fn menu(packaged: bool) -> String {
             { "type": "separator" },
             { "role": "cut" }, { "role": "copy" }, { "role": "paste" }, { "role": "selectAll" },
             { "type": "separator" },
-            // The page reads itself aloud; the shortcut is Edge's.
-            { "label": "Speech Mode", "action": "speech-mode", "accelerator": "CommandOrControl+Shift+U" },
+            // The page reads itself aloud, with contenTTS's shortcut (a test keeps them one).
+            { "label": "Speech Mode", "action": "speech-mode", "accelerator": "CommandOrControl+Shift+K" },
         ]},
         { "label": "View", "submenu": view },
         { "label": "Window", "submenu": [{ "role": "minimize" }, { "role": "zoom" }] },
